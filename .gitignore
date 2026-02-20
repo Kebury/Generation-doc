@@ -1,0 +1,19 @@
+# Сборка
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+
+# Конфиги и пресеты
+generation_doc_config.json
+presets/
+
+# Папки проекта
+документы/
+разработка/
+Шаблоны/
+Generation-doc/
+
+
