@@ -1579,10 +1579,15 @@ class TabTask:
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         
         def bind_to_mousewheel(widget):
-            """Рекурсивно привязываем прокрутку ко всем виджетам"""
-            widget.bind("<MouseWheel>", on_mousewheel)
-            for child in widget.winfo_children():
-                bind_to_mousewheel(child)
+            """Рекурсивно привязываем прокрутку ко всем виджетам, КРОМЕ Text и Listbox"""
+            try:
+                # НЕ привязываем к Text и Listbox - у них свой скролл
+                if not isinstance(widget, (tk.Text, tk.Listbox)):
+                    widget.bind("<MouseWheel>", on_mousewheel)
+                for child in widget.winfo_children():
+                    bind_to_mousewheel(child)
+            except:
+                pass
         
         canvas.bind("<MouseWheel>", on_mousewheel)
         scrollable_frame.bind("<MouseWheel>", on_mousewheel)
@@ -1943,26 +1948,22 @@ class TabTask:
             bg=COLORS["card_bg"],
             font=FONTS["mono"],
             relief=tk.FLAT,
-            borderwidth=0,
-            fg=COLORS["text_primary"],
-            state=tk.DISABLED
+            borderwidth=0
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        enable_field_shortcuts(self.log_text, readonly=True)
-        add_context_menu(self.log_text, readonly=True)
+        self.log_text.config(state=tk.DISABLED)
         
+        # Контекстное меню для лога
         def show_context_menu(event):
             menu = ModernContextMenu(self.log_text)
             menu.add_command(label="Копировать", command=self.copy_log_text)
             menu.add_command(label="Выделить всё", command=self.select_all_log)
-            menu.add_separator()
-            menu.add_command(label="Очистить лог", command=lambda: self.log_text.delete("1.0", tk.END))
             menu.post(event.x_root, event.y_root)
         
         self.log_text.bind("<Button-3>", show_context_menu)
         
-        if hasattr(self, '_bind_to_mousewheel'):
-            self._bind_to_mousewheel(main_frame)
+        # Отложенная привязка скролла после создания всех виджетов
+        self.parent_frame.after(100, lambda: bind_to_mousewheel(scrollable_frame))
     
     def refresh_custom_list_widgets(self):
         """Обновление виджетов выпадающих списков"""
@@ -2132,8 +2133,10 @@ class TabTask:
     
     def log(self, message):
         """Добавление сообщения в лог"""
+        self.log_text.config(state=tk.NORMAL)
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
     
     def copy_log_text(self):
         """Копирование выделенного текста"""
@@ -2607,15 +2610,33 @@ class MergeTabTask:
             filetypes=filetypes
         )
         
-        for file in files:
-            if file not in self.file_list:
-                self.file_list.append(file)
-                self.files_listbox.insert(tk.END, os.path.basename(file))
-                
-                if file.lower().endswith(('.docx', '.doc')):
-                    word_preload_manager.preload(file)
+        if not files:
+            return
+        
+        # Временно отключаем listbox для быстрой вставки
+        added_count = 0
+        try:
+            if len(files) > 10:  # Оптимизация только для большого количества файлов
+                self.files_listbox.config(state=tk.DISABLED)
+            
+            for file in files:
+                if file not in self.file_list:
+                    self.file_list.append(file)
+                    self.files_listbox.insert(tk.END, os.path.basename(file))
+                    added_count += 1
+                    
+                    if file.lower().endswith(('.docx', '.doc')):
+                        word_preload_manager.preload(file)
+            
+            if len(files) > 10:
+                self.files_listbox.config(state=tk.NORMAL)
+        except Exception as e:
+            self.files_listbox.config(state=tk.NORMAL)
+            raise e
         
         self.update_file_counter()
+        if added_count > 0:
+            self.log(f"Добавлено файлов: {added_count}")
     
     def remove_file(self):
         """Удалить выбранный файл"""
@@ -2631,25 +2652,48 @@ class MergeTabTask:
         if not self.file_list:
             return
         
+        count = len(self.file_list)
         result = messagebox.askyesno(
             "Подтверждение",
-            f"Вы уверены, что хотите удалить все файлы из списка?\n\nВсего файлов: {len(self.file_list)}",
+            f"Вы уверены, что хотите удалить все файлы из списка?\n\nВсего файлов: {count}",
             parent=self.window.window
         )
         
         if result:
-            self.file_list.clear()
-            self.files_listbox.delete(0, tk.END)
-            self.update_file_counter()
-            self.log("Все файлы удалены из списка")
+            # Временно отключаем обновление для ускорения
+            try:
+                self.files_listbox.config(state=tk.DISABLED)
+                self.window.window.update_idletasks()
+                
+                # Быстрое удаление
+                self.file_list.clear()
+                self.files_listbox.delete(0, tk.END)
+                
+                # Обновляем счетчик
+                self.update_file_counter()
+                
+                # Включаем обратно
+                self.files_listbox.config(state=tk.NORMAL)
+                
+                self.log(f"Удалено {count} файлов из списка")
+            except Exception as e:
+                self.files_listbox.config(state=tk.NORMAL)
+                raise e
     
     def move_up(self):
         """Переместить файл вверх"""
         selection = self.files_listbox.curselection()
         if selection and selection[0] > 0:
             index = selection[0]
+            # Меняем местами в списке
             self.file_list[index], self.file_list[index-1] = self.file_list[index-1], self.file_list[index]
-            self.refresh_listbox()
+            
+            # Меняем местами в listbox напрямую (быстрее чем refresh_listbox)
+            file1 = os.path.basename(self.file_list[index])
+            file2 = os.path.basename(self.file_list[index-1])
+            self.files_listbox.delete(index-1, index)
+            self.files_listbox.insert(index-1, file2)
+            self.files_listbox.insert(index-1, file1)
             self.files_listbox.selection_set(index-1)
     
     def move_down(self):
@@ -2657,15 +2701,30 @@ class MergeTabTask:
         selection = self.files_listbox.curselection()
         if selection and selection[0] < len(self.file_list) - 1:
             index = selection[0]
+            # Меняем местами в списке
             self.file_list[index], self.file_list[index+1] = self.file_list[index+1], self.file_list[index]
-            self.refresh_listbox()
+            
+            # Меняем местами в listbox напрямую (быстрее чем refresh_listbox)
+            file1 = os.path.basename(self.file_list[index])
+            file2 = os.path.basename(self.file_list[index+1])
+            self.files_listbox.delete(index, index+1)
+            self.files_listbox.insert(index, file2)
+            self.files_listbox.insert(index, file1)
             self.files_listbox.selection_set(index+1)
     
     def refresh_listbox(self):
         """Обновить отображение списка файлов"""
+        # Оптимизация для больших списков
+        if len(self.file_list) > 50:
+            self.files_listbox.config(state=tk.DISABLED)
+        
         self.files_listbox.delete(0, tk.END)
         for file in self.file_list:
             self.files_listbox.insert(tk.END, os.path.basename(file))
+        
+        if len(self.file_list) > 50:
+            self.files_listbox.config(state=tk.NORMAL)
+        
         self.update_file_counter()
     
     def update_file_counter(self):
@@ -2939,11 +2998,79 @@ DEFAULT_PLACEHOLDERS = []
 
 # ── ФУНКЦИИ ДЛЯ ПАРАЛЛЕЛЬНОЙ ОБРАБОТКИ ──────────────────────────────
 
-def _replace_placeholders_in_paragraph(paragraph, replacements):
-    """Вспомогательная функция замены плейсхолдеров (для использования в процессах)"""
-    from docx.oxml.ns import qn
+def create_placeholder_pattern(placeholder):
+    """
+    Создаёт regex паттерн для поиска плейсхолдера.
+    Использует word boundary (\\b) только если плейсхолдер начинается/заканчивается 
+    буквенно-цифровым символом, иначе ищет точное совпадение.
     
+    Примеры:
+    - "дата" -> r'\\bдата\\b' (обычное слово)
+    - "{дата}" -> r'{дата}' (спецсимволы в начале/конце)
+    - "[значение]" -> r'\\[значение\\]' (экранированные скобки)
+    """
+    escaped = re.escape(placeholder)
+    # Проверяем первый и последний символ
+    starts_with_word = placeholder and placeholder[0].isalnum()
+    ends_with_word = placeholder and placeholder[-1].isalnum()
+    
+    # Добавляем \b только там, где это имеет смысл
+    prefix = r'\b' if starts_with_word else ''
+    suffix = r'\b' if ends_with_word else ''
+    
+    return prefix + escaped + suffix
+
+def _normalize_paragraph_runs(paragraph):
+    """Объединяет смежные runs с одинаковым форматированием.
+    
+    Word часто разбивает текст на множество runs даже при одинаковом форматировании,
+    что мешает поиску плейсхолдеров. Эта функция склеивает такие runs.
+    """
+    if len(paragraph.runs) <= 1:
+        return
+    
+    i = 0
+    while i < len(paragraph.runs) - 1:
+        current = paragraph.runs[i]
+        next_run = paragraph.runs[i + 1]
+        
+        # Проверяем одинаковое ли форматирование
+        if (current.bold == next_run.bold and
+            current.italic == next_run.italic and
+            current.underline == next_run.underline and
+            current.font.size == next_run.font.size and
+            current.font.name == next_run.font.name and
+            current.font.color.rgb == next_run.font.color.rgb):
+            
+            # Объединяем runs
+            current.text = current.text + next_run.text
+            
+            # Удаляем следующий run
+            p = next_run._element.getparent()
+            p.remove(next_run._element)
+        else:
+            i += 1
+
+def _replace_placeholders_in_paragraph(paragraph, replacements):
+    """Вспомогательная функция замены плейсхолдеров (для использования в процессах)
+    
+    Сначала нормализует параграф (объединяет runs с одинаковым форматированием),
+    затем делает замену. Это решает проблему разбитых плейсхолдеров И сохраняет форматирование.
+    """
+    from docx.oxml.ns import qn
+    import re
+    
+    # Проверяем есть ли хоть один плейсхолдер в полном тексте
+    full_text = paragraph.text
+    if not any(ph in full_text for ph in replacements):
+        return
+    
+    # Нормализуем runs (объединяем смежные с одинаковым форматированием)
+    _normalize_paragraph_runs(paragraph)
+    
+    # Теперь делаем замену в каждом run
     for run in paragraph.runs:
+        # Проверяем есть ли в run встроенные объекты (картинки, фигуры)
         has_objects = False
         if hasattr(run._element, 'xpath'):
             drawings = run._element.xpath('.//w:drawing')
@@ -2951,16 +3078,20 @@ def _replace_placeholders_in_paragraph(paragraph, replacements):
             has_objects = len(drawings) > 0 or len(pictures) > 0
         
         if has_objects:
+            # Если есть объекты, работаем на уровне XML элементов текста
             for text_elem in run._element.findall(qn('w:t')):
                 if text_elem.text:
                     modified_text = text_elem.text
                     for placeholder, replacement in replacements.items():
-                        modified_text = modified_text.replace(placeholder, str(replacement))
+                        pattern = re.escape(placeholder)
+                        modified_text = re.sub(pattern, str(replacement), modified_text)
                     text_elem.text = modified_text
         else:
+            # Обычная замена для run без объектов
             text = run.text
             for placeholder, replacement in replacements.items():
-                text = text.replace(placeholder, str(replacement))
+                pattern = re.escape(placeholder)
+                text = re.sub(pattern, str(replacement), text)
             run.text = text
 
 def _convert_single_pdf(args):
@@ -3124,7 +3255,13 @@ def _process_single_document(args):
                 continue
             
             value = row_data.get(ph["name"], "")
-            replacements[ph["name"]] = value
+            
+            # Гарантируем что ключ содержит фигурные скобки
+            placeholder_key = ph["name"]
+            if not placeholder_key.startswith('{'):
+                placeholder_key = f"{{{placeholder_key}}}"
+            
+            replacements[placeholder_key] = value
         
         for paragraph in doc.paragraphs:
             _replace_placeholders_in_paragraph(paragraph, replacements)
@@ -5333,14 +5470,25 @@ class GenerationDocApp:
     
     def save_config(self):
         """Сохранение конфигурации в файл"""
-        config = {
+        # Читаем существующий конфиг чтобы сохранить excel_presets
+        config = {}
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except:
+                pass
+        
+        # Обновляем только нужные поля, сохраняя остальные (включая excel_presets)
+        config.update({
             "placeholders": self.PLACEHOLDERS,
             "custom_lists": self.CUSTOM_LISTS,
             "last_excel_dir": self.last_excel_dir,
             "last_word_dir": self.last_word_dir,
             "last_output_dir": self.last_output_dir,
             "worker_processes": self.worker_processes.get()
-        }
+        })
+        
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     
@@ -8449,6 +8597,10 @@ class FileBuilderWindow:
             elif event.num == 5:
                 canvas.yview_scroll(1, "units")
         
+        # Сохраняем обработчики для привязки к динамически создаваемым виджетам
+        self._on_mousewheel = _on_mousewheel
+        self._on_mouse_button = _on_mouse_button
+        
         canvas.bind("<MouseWheel>", _on_mousewheel)
         canvas.bind("<Button-4>", _on_mouse_button)  # Linux - прокрутка вверх
         canvas.bind("<Button-5>", _on_mouse_button)  # Linux - прокрутка вниз
@@ -8562,6 +8714,23 @@ class FileBuilderWindow:
         )
         create_btn.pack(side=tk.RIGHT)
     
+    def bind_scroll_to_widget(self, widget):
+        """Рекурсивно привязать события прокрутки к виджету и всем его дочерним элементам"""
+        # Не привязываем к Listbox и Text виджетам
+        if isinstance(widget, (tk.Listbox, tk.Text, ScrolledText)):
+            return
+        
+        try:
+            widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+            widget.bind("<Button-4>", self._on_mouse_button, add="+")
+            widget.bind("<Button-5>", self._on_mouse_button, add="+")
+        except:
+            pass
+        
+        # Рекурсивно для всех дочерних виджетов
+        for child in widget.winfo_children():
+            self.bind_scroll_to_widget(child)
+    
     def add_log(self, message, tag="info"):
         """Добавить запись в лог"""
         self.log_text.insert(tk.END, message, tag)
@@ -8660,6 +8829,8 @@ class FileBuilderWindow:
         dialog.withdraw()
         dialog.title("Загрузить пресет")
         dialog.geometry("500x400")
+        dialog.minsize(400, 300)
+        dialog.resizable(True, True)
         dialog.transient(self.window)
         
         dialog.update_idletasks()
@@ -8692,40 +8863,109 @@ class FileBuilderWindow:
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
         
-        # Заполняем список
+        # Заполняем список (только имена и количество колонок)
         preset_names = list(excel_presets.keys())
         for name in preset_names:
             preset = excel_presets[name]
             col_count = len(preset.get("column_mappings", []))
             listbox.insert(tk.END, f"{name} ({col_count} колонок)")
         
-        # Информация о выбранном пресете
-        info_label = tk.Label(
-            dialog,
-            text="",
-            font=FONTS["small"],
-            fg=COLORS["text_secondary"],
-            wraplength=450,
-            justify=tk.LEFT
-        )
-        info_label.pack(padx=15, pady=(0, 10))
+        # Tooltip для отображения деталей пресета при наведении
+        hover_tooltip = None
         
-        def on_select(event):
-            if listbox.curselection():
-                idx = listbox.curselection()[0]
-                preset_name = preset_names[idx]
-                preset = excel_presets[preset_name]
-                mappings = preset.get("column_mappings", [])
+        def show_preset_details(event):
+            nonlocal hover_tooltip
+            
+            # Закрываем предыдущий tooltip
+            if hover_tooltip:
+                try:
+                    hover_tooltip.destroy()
+                except:
+                    pass
+                hover_tooltip = None
+            
+            # Получаем элемент под курсором
+            index = listbox.nearest(event.y)
+            if index < 0 or index >= len(preset_names):
+                return
+            
+            preset_name = preset_names[index]
+            preset = excel_presets[preset_name]
+            mappings = preset.get("column_mappings", [])
+            
+            if not mappings:
+                return
+            
+            # Создаем tooltip окно
+            hover_tooltip = tk.Toplevel(dialog)
+            hover_tooltip.wm_overrideredirect(True)
+            hover_tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+            
+            tooltip_frame = tk.Frame(
+                hover_tooltip,
+                bg=COLORS["bg_tertiary"],
+                relief=tk.SOLID,
+                borderwidth=1
+            )
+            tooltip_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Заголовок
+            tk.Label(
+                tooltip_frame,
+                text=f"Колонки в пресете '{preset_name}':",
+                font=FONTS["button"],
+                bg=COLORS["primary_dark"],
+                fg="white",
+                padx=10,
+                pady=5
+            ).pack(fill=tk.X)
+            
+            # Список колонок с прокруткой (максимум 10 строк)
+            details_frame = tk.Frame(tooltip_frame, bg=COLORS["bg_tertiary"])
+            details_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+            # Ограничиваем количество отображаемых колонок
+            max_display = 15
+            for i, mapping in enumerate(mappings[:max_display]):
+                col_name = mapping.get('column_name', mapping.get('placeholder', ''))
+                source_cols = ', '.join(mapping.get('source_columns', []))
+                # Ограничиваем длину строки
+                if len(source_cols) > 50:
+                    source_cols = source_cols[:47] + "..."
                 
-                info_text = f"Колонки в пресете:\n"
-                for mapping in mappings:
-                    col_name = mapping.get('column_name', mapping.get('placeholder', ''))
-                    source_cols = ', '.join(mapping.get('source_columns', []))
-                    info_text += f"• {col_name}: {source_cols}\n"
-                
-                info_label.config(text=info_text)
+                tk.Label(
+                    details_frame,
+                    text=f"• {col_name}: {source_cols}",
+                    font=FONTS["small"],
+                    bg=COLORS["bg_tertiary"],
+                    fg=COLORS["text_primary"],
+                    anchor="w",
+                    justify=tk.LEFT
+                ).pack(anchor="w", pady=1)
+            
+            # Если колонок больше, показываем "..."
+            if len(mappings) > max_display:
+                tk.Label(
+                    details_frame,
+                    text=f"... и ещё {len(mappings) - max_display} колонок",
+                    font=FONTS["small"],
+                    bg=COLORS["bg_tertiary"],
+                    fg=COLORS["text_secondary"],
+                    anchor="w",
+                    justify=tk.LEFT
+                ).pack(anchor="w", pady=1)
         
-        listbox.bind('<<ListboxSelect>>', on_select)
+        def hide_preset_details(event):
+            nonlocal hover_tooltip
+            if hover_tooltip:
+                try:
+                    hover_tooltip.destroy()
+                except:
+                    pass
+                hover_tooltip = None
+        
+        listbox.bind('<Motion>', show_preset_details)
+        listbox.bind('<Leave>', hide_preset_details)
         
         selected_preset = [None]
         
@@ -8749,7 +8989,6 @@ class FileBuilderWindow:
                         
                         listbox.delete(idx)
                         preset_names.pop(idx)
-                        info_label.config(text="")
                         messagebox.showinfo("Успешно", f"Пресет '{preset_name}' удален", parent=dialog)
                     except Exception as e:
                         messagebox.showerror("Ошибка", f"Не удалось удалить пресет:\n{str(e)}", parent=dialog)
@@ -8864,14 +9103,17 @@ class FileBuilderWindow:
             widget.destroy()
         
         if not self.column_mappings:
-            tk.Label(
+            empty_label = tk.Label(
                 self.mappings_frame,
                 text="Нажмите '+ Добавить колонку' для начала работы",
                 bg=COLORS["bg_secondary"],
                 font=FONTS["body"],
                 fg=COLORS["text_secondary"],
                 pady=50
-            ).pack()
+            )
+            empty_label.pack()
+            # Привязываем прокрутку и к пустому лейблу
+            self.bind_scroll_to_widget(empty_label)
             return
         
         for idx, mapping in enumerate(self.column_mappings):
@@ -8918,19 +9160,28 @@ class FileBuilderWindow:
             )
             del_btn.pack(side=tk.LEFT, padx=2)
             
-            content_frame = tk.Frame(frame, bg=COLORS["bg_tertiary"])
+            content_frame = tk.Frame(frame, bg=COLORS["bg_tertiary"], height=60)
             content_frame.pack(fill=tk.X, padx=10, pady=10)
+            content_frame.pack_propagate(False)
+            
+            # Контейнер с прокруткой для длинных списков колонок
+            inner_scroll_frame = tk.Frame(content_frame, bg=COLORS["bg_tertiary"])
+            inner_scroll_frame.pack(fill=tk.BOTH, expand=True)
             
             columns_text = " + ".join(mapping['source_columns'])
+            # Ограничиваем отображение очень длинных списков
+            if len(columns_text) > 200:
+                columns_text = columns_text[:197] + "..."
+            
             tk.Label(
-                content_frame,
+                inner_scroll_frame,
                 text=f"Исходные колонки: {columns_text}",
                 bg=COLORS["bg_tertiary"],
                 font=FONTS["body"],
                 fg=COLORS["text_primary"],
-                wraplength=800,
-                justify=tk.LEFT
-            ).pack(anchor=tk.W)
+                justify=tk.LEFT,
+                anchor="nw"
+            ).pack(anchor=tk.W, fill=tk.BOTH, expand=True)
             
             function_names = {
                 "default": "Дефолтная функция",
@@ -8946,12 +9197,15 @@ class FileBuilderWindow:
             func_name = function_names.get(func_type, func_type)
             
             tk.Label(
-                content_frame,
+                inner_scroll_frame,
                 text=f"Функция: {func_name}",
                 bg=COLORS["bg_tertiary"],
                 font=FONTS["small"],
                 fg=COLORS["text_secondary"]
             ).pack(anchor=tk.W, pady=(5, 0))
+            
+            # Привязываем прокрутку колесом мыши ко всем элементам карточки
+            self.bind_scroll_to_widget(frame)
     
     def create_file(self):
         """Создать результирующий файл"""
@@ -11293,7 +11547,7 @@ class PreviewWindow:
                     # Находим все вхождения плейсхолдеров в этом run
                     matches = []
                     for placeholder in placeholders:
-                        pattern = r'\b' + re.escape(placeholder) + r'\b'
+                        pattern = create_placeholder_pattern(placeholder)
                         for match in re.finditer(pattern, text, re.IGNORECASE):
                             matches.append((match.start(), match.end(), placeholder))
                     
@@ -11368,7 +11622,7 @@ class PreviewWindow:
                 highlighted_words = 0
                 for para_idx, para in enumerate(doc.paragraphs):
                     para_text = para.text
-                    if para_text and any(re.search(r'\b' + re.escape(ph) + r'\b', para_text, re.IGNORECASE) for ph in active_placeholders):
+                    if para_text and any(re.search(create_placeholder_pattern(ph), para_text, re.IGNORECASE) for ph in active_placeholders):
                         for run_idx in range(len(para.runs) - 1, -1, -1):
                             run = para.runs[run_idx]
                             highlighted_words += split_and_highlight_run(para, run, active_placeholders)
@@ -11379,7 +11633,7 @@ class PreviewWindow:
                         for cell_idx, cell in enumerate(row.cells):
                             for para in cell.paragraphs:
                                 para_text = para.text
-                                if para_text and any(re.search(r'\b' + re.escape(ph) + r'\b', para_text, re.IGNORECASE) for ph in active_placeholders):
+                                if para_text and any(re.search(create_placeholder_pattern(ph), para_text, re.IGNORECASE) for ph in active_placeholders):
                                     for run_idx in range(len(para.runs) - 1, -1, -1):
                                         run = para.runs[run_idx]
                                         highlighted_words += split_and_highlight_run(para, run, active_placeholders)
