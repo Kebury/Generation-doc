@@ -6827,9 +6827,72 @@ class GenerationDocApp:
             # Если текущее слово уже в целевом падеже, проверяем, не является ли оно частью согласованного словосочетания
             current_parses = word_case_info[idx]
             
+            # Проверяем, не является ли текущее слово фамилией
+            # Признаки фамилии:
+            # 1. Перед словом стоит инициал (А.В. Дроздов)
+            # 2. После слова стоит инициал (Дроздов А.В.)
+            # 3. Типичные окончания фамилий
+            is_likely_surname = False
+            
+            # Проверка 1: перед текущим словом инициал
+            if idx > 0:
+                prev_word = words[idx - 1]
+                prev_clean = prev_word.rstrip(',.;:!?')
+                prev_no_dots = prev_clean.replace('.', '')
+                # Проверяем, был ли предыдущий элемент инициалом
+                is_prev_initial = False
+                if len(prev_no_dots) == 1 and prev_no_dots.isalpha() and prev_no_dots.isupper():
+                    is_prev_initial = True
+                elif prev_no_dots.isupper() and prev_no_dots.isalpha() and 2 <= len(prev_no_dots) <= 4:
+                    is_prev_initial = True
+                
+                if is_prev_initial and is_capitalized:
+                    is_likely_surname = True
+            
+            # Проверка 2: после текущего слова инициал или имя/отчество
+            if idx < len(words) - 1 and is_capitalized:
+                next_word = words[idx + 1]
+                next_clean = next_word.rstrip(',.;:!?')
+                next_no_dots = next_clean.replace('.', '')
+                # Проверяем, является ли следующий элемент инициалом
+                is_next_initial = False
+                if len(next_no_dots) == 1 and next_no_dots.isalpha() and next_no_dots.isupper():
+                    is_next_initial = True
+                elif next_no_dots.isupper() and next_no_dots.isalpha() and 2 <= len(next_no_dots) <= 4:
+                    is_next_initial = True
+                
+                if is_next_initial:
+                    is_likely_surname = True
+                else:
+                    # Проверяем, является ли следующее слово именем (с заглавной буквы, не инициал)
+                    # или отчеством (типичные окончания)
+                    next_lower = next_clean.lower()
+                    is_next_capitalized = next_clean and next_clean[0].isupper()
+                    
+                    # Проверка на отчество
+                    is_patronymic = next_lower.endswith(('ович', 'евич', 'ьич', 'овна', 'евна', 'ична', 'ьевна'))
+                    
+                    # Если после текущего слова идёт слово с заглавной (имя) или отчество
+                    if is_next_capitalized or is_patronymic:
+                        is_likely_surname = True
+            
+            # Проверка 3: типичные окончания русских фамилий (мужских и женских)
+            if is_capitalized:
+                word_lower_check = clean_word.lower()
+                surname_endings = (
+                    'ов', 'ев', 'ёв', 'ин', 'ын',  # мужские
+                    'ова', 'ева', 'ёва', 'ина', 'ына',  # женские
+                    'ский', 'цкий', 'ская', 'цкая',  # прилагательные
+                    'ой', 'ый', 'ая'  # прилагательные
+                )
+                if word_lower_check.endswith(surname_endings):
+                    is_likely_surname = True
+            
             # Ищем разбор текущего слова, который соответствует целевому падежу
             current_info = None
-            if current_parses:
+            # ВАЖНО: если слово похоже на фамилию, не проверяем его на "уже в нужном падеже"
+            # так как фамилии должны склоняться через специализированные функции
+            if current_parses and not is_likely_surname:
                 for parse in current_parses:
                     if parse['current_case'] == case:
                         current_info = parse
