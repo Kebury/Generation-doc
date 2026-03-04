@@ -6750,24 +6750,27 @@ class GenerationDocApp:
                     birth_year_indices.add(i + 1)
         
         # Предварительный анализ падежей всех слов
-        word_case_info = []  # Список словарей с информацией о каждом слове
+        word_case_info = []  # Список списков с информацией о каждом слове (все возможные разборы)
         for word in words:
             clean_word = word.rstrip(',.;:!?')
             try:
                 parses = self.morph.parse(clean_word.lower())
                 if parses:
-                    p = parses[0]
-                    word_info = {
-                        'current_case': p.tag.case,  # Текущий падеж слова
-                        'pos': p.tag.POS,  # Часть речи (NOUN, ADJF и т.д.)
-                        'gender': p.tag.gender,  # Род
-                        'number': p.tag.number  # Число
-                    }
+                    # Сохраняем ВСЕ возможные разборы слова
+                    word_parses = []
+                    for p in parses:
+                        word_info = {
+                            'current_case': p.tag.case,  # Текущий падеж слова
+                            'pos': p.tag.POS,  # Часть речи (NOUN, ADJF и т.д.)
+                            'gender': p.tag.gender,  # Род
+                            'number': p.tag.number  # Число
+                        }
+                        word_parses.append(word_info)
+                    word_case_info.append(word_parses)
                 else:
-                    word_info = None
+                    word_case_info.append(None)
             except:
-                word_info = None
-            word_case_info.append(word_info)
+                word_case_info.append(None)
         
         result_words = []
         skip_indices = set()  # Индексы слов, которые нужно пропустить (уже обработаны)
@@ -6822,35 +6825,89 @@ class GenerationDocApp:
             
             # НОВАЯ ЛОГИКА: проверка согласованных словосочетаний
             # Если текущее слово уже в целевом падеже, проверяем, не является ли оно частью согласованного словосочетания
-            current_info = word_case_info[idx]
-            if current_info and current_info['current_case'] == case:
+            current_parses = word_case_info[idx]
+            
+            # Ищем разбор текущего слова, который соответствует целевому падежу
+            current_info = None
+            if current_parses:
+                for parse in current_parses:
+                    if parse['current_case'] == case:
+                        current_info = parse
+                        break
+            
+            if current_info:
                 # Слово уже в нужном падеже
                 # Проверяем, есть ли следующие слова, которые тоже в этом падеже (согласованное словосочетание)
                 phrase_words = [word]
                 phrase_end_idx = idx
+                last_case_word_info = current_info  # Последнее слово с падежом (для проверки согласования)
                 
                 # Смотрим на следующие слова
                 for next_idx in range(idx + 1, len(words)):
-                    next_info = word_case_info[next_idx]
+                    next_parses = word_case_info[next_idx]
                     next_word = words[next_idx]
                     next_clean = next_word.rstrip(',.;:!?')
                     
-                    # Пропускаем предлоги и союзы
-                    if next_info and next_info['pos'] in ('PREP', 'CONJ'):
+                    # Проверка на число - включаем в фразу и продолжаем поиск
+                    is_next_number = next_clean.replace('-', '').isdigit()
+                    if is_next_number:
                         phrase_words.append(next_word)
                         phrase_end_idx = next_idx
                         continue
                     
-                    # Если следующее слово тоже в целевом падеже и согласуется по роду/числу
-                    if next_info and next_info['current_case'] == case:
-                        # Проверка согласования: прилагательное с существительным должны совпадать по роду и числу
-                        if (next_info['pos'] in ('NOUN', 'ADJF', 'PRTF') and 
-                            current_info['gender'] == next_info['gender'] and 
-                            current_info['number'] == next_info['number']):
-                            phrase_words.append(next_word)
-                            phrase_end_idx = next_idx
-                        else:
-                            break
+                    # Проверка на дату - включаем в фразу и продолжаем поиск
+                    is_next_date = False
+                    if '.' in next_clean:
+                        parts = next_clean.split('.')
+                        if len(parts) == 3 and all(p.isdigit() for p in parts):
+                            if len(parts[0]) <= 2 and len(parts[1]) <= 2 and len(parts[2]) == 4:
+                                is_next_date = True
+                    if is_next_date:
+                        phrase_words.append(next_word)
+                        phrase_end_idx = next_idx
+                        continue
+                    
+                    # Проверка на инициалы - включаем в фразу и продолжаем поиск
+                    clean_no_dots_next = next_clean.replace('.', '')
+                    is_next_initial = False
+                    if len(clean_no_dots_next) == 1 and clean_no_dots_next.isalpha():
+                        is_next_initial = True
+                    elif clean_no_dots_next.isupper() and clean_no_dots_next.isalpha() and 2 <= len(clean_no_dots_next) <= 4:
+                        is_next_initial = True
+                    if is_next_initial:
+                        phrase_words.append(next_word)
+                        phrase_end_idx = next_idx
+                        continue
+                    
+                    # Ищем среди разборов следующего слова подходящий (в нужном падеже и согласованный)
+                    next_info = None
+                    if next_parses:
+                        # Сначала проверяем предлоги и союзы
+                        for parse in next_parses:
+                            if parse['pos'] in ('PREP', 'CONJ'):
+                                phrase_words.append(next_word)
+                                phrase_end_idx = next_idx
+                                next_info = 'skip'  # Маркер что нашли предлог/союз
+                                break
+                        
+                        if next_info == 'skip':
+                            continue
+                        
+                        # Ищем разбор в нужном падеже, согласованный по роду и числу
+                        for parse in next_parses:
+                            if parse['current_case'] == case:
+                                # Проверка согласования
+                                if (parse['pos'] in ('NOUN', 'ADJF', 'PRTF') and 
+                                    last_case_word_info['gender'] == parse['gender'] and 
+                                    last_case_word_info['number'] == parse['number']):
+                                    next_info = parse
+                                    break
+                    
+                    # Если нашли согласованное слово в целевом падеже
+                    if next_info and next_info != 'skip':
+                        phrase_words.append(next_word)
+                        phrase_end_idx = next_idx
+                        last_case_word_info = next_info  # Обновляем последнее слово с падежом
                     else:
                         break
                 
