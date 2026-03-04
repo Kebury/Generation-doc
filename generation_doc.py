@@ -6127,11 +6127,13 @@ class GenerationDocApp:
             tab.log(f"   {excel_file}")
             df = pd.read_excel(excel_file, engine='openpyxl')
             
-            # Преобразуем все столбцы в строки, но даты форматируем правильно
-            for col in df.columns:
-                df[col] = df[col].apply(lambda x: self.to_date(x) if pd.notna(x) else "")
-            
             tab.log(f"   ✓ Прочитано строк: {len(df)}")
+            
+            # Определяем колонки с датами по заголовкам
+            date_columns = [col for col in df.columns if self.is_date_column(col)]
+            if date_columns:
+                tab.log(f"\n📅 Колонки с датами: {', '.join(date_columns)}")
+            
             tab.log(f"\n📝 Используемый шаблон:")
             tab.log(f"   {word_template}")
             tab.log(f"\n⚡ Режим производительности:")
@@ -6168,7 +6170,12 @@ class GenerationDocApp:
                 
                 # Копируем данные из Excel
                 for col in df.columns:
-                    row_data[col] = row[col]
+                    value = row[col]
+                    # Форматируем даты только в колонках с датами
+                    if col in date_columns and pd.notna(value):
+                        row_data[col] = self.to_date(value)
+                    else:
+                        row_data[col] = value
                 
                 # Логируем заголовок строки
                 tab.log(f"\n" + "─" * 60)
@@ -6630,6 +6637,15 @@ class GenerationDocApp:
         # Если не подошло ни одно правило, возвращаем None
         return None
     
+    def is_date_column(self, col_name):
+        """Проверка, является ли колонка датой по заголовку"""
+        col_lower = col_name.lower()
+        date_keywords = ["дата", "д.р.", "д/р", "д.р", "date", "рождения", "рождение"]
+        for keyword in date_keywords:
+            if keyword in col_lower:
+                return True
+        return False
+    
     def apply_case(self, value, case="nomn"):
         """Применение падежа к тексту"""
         import pandas as pd
@@ -6686,8 +6702,16 @@ class GenerationDocApp:
                 result_words.append(word)
                 continue
             
+            # Проверка на инициалы (И., И.В., и т.п.)
+            # Инициалы - это одна или несколько заглавных букв с точками
             clean_no_dots = clean_word.replace('.', '')
+            # Одиночный инициал (И.)
             if len(clean_no_dots) == 1 and clean_no_dots.isalpha():
+                result_words.append(word)
+                continue
+            # Составные инициалы (И.В., А.С. и т.п.)
+            # Проверяем: все символы без точек - заглавные буквы и их 2-3
+            if clean_no_dots.isupper() and clean_no_dots.isalpha() and 2 <= len(clean_no_dots) <= 4:
                 result_words.append(word)
                 continue
             
@@ -6767,6 +6791,17 @@ class GenerationDocApp:
             except:
                 pass
         
+        # Проверка на чистое время (без даты): 9:00, 9 ч 00 мин и т.п.
+        # Если строка содержит двоеточие или "ч" (час), но не содержит точку, дефис или слэш (элементы даты)
+        time_indicators = [':']
+        date_indicators = ['.', '-', '/']
+        has_time = any(ind in value_str for ind in time_indicators) or ' ч ' in value_str.lower() or value_str.lower().endswith(' ч')
+        has_date = any(ind in value_str for ind in date_indicators)
+        
+        # Если есть признаки времени, но нет признаков даты - возвращаем как есть
+        if has_time and not has_date:
+            return value_str
+        
         # Удаляем временную часть, если есть (например "2024-01-15 00:00:00" -> "2024-01-15")
         if ' ' in value_str:
             date_part = value_str.split(' ')[0]
@@ -6777,30 +6812,27 @@ class GenerationDocApp:
             except:
                 pass
         
-        # Пытаемся распарсить как дату
-        try:
-            dt = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
-            if pd.notna(dt):
-                return dt.strftime('%d.%m.%Y')
-        except:
-            pass
-        
-        # Если значение числовое (serial date из Excel)
+        # Если значение числовое (serial date из Excel) - проверяем только если это явно datetime
         if isinstance(value, (int, float)):
-            if 20000 < value < 50000:
-                base_date = datetime(1899, 12, 30)
-                dt = base_date + timedelta(days=int(value))
-                return dt.strftime('%d.%m.%Y')
+            # Проверяем диапазон Excel serial dates (с 1900 года до ~2100)
+            if 1 < value < 100000:
+                try:
+                    base_date = datetime(1899, 12, 30)
+                    dt = base_date + timedelta(days=int(value))
+                    # Проверяем, что результат - разумная дата (1900-2100 годы)
+                    if 1900 <= dt.year <= 2100:
+                        return dt.strftime('%d.%m.%Y')
+                except:
+                    pass
         
-        # Если строка выглядит как число (serial date)
-        try:
-            num_value = float(value_str)
-            if 20000 < num_value < 50000:
-                base_date = datetime(1899, 12, 30)
-                dt = base_date + timedelta(days=int(num_value))
-                return dt.strftime('%d.%m.%Y')
-        except:
-            pass
+        # Пытаемся распарсить как дату (только если есть признаки даты в строке)
+        if '/' in value_str or '-' in value_str or '.' in value_str:
+            try:
+                dt = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
+                if pd.notna(dt):
+                    return dt.strftime('%d.%m.%Y')
+            except:
+                pass
         
         return value_str
     
@@ -8441,6 +8473,16 @@ class ExcelConstructorWindow:
             except:
                 pass
         
+        # Проверка на чистое время (без даты): 9:00, 9 ч 00 мин и т.п.
+        time_indicators = [':']
+        date_indicators = ['.', '-', '/']
+        has_time = any(ind in value_str for ind in time_indicators) or ' ч ' in value_str.lower() or value_str.lower().endswith(' ч')
+        has_date = any(ind in value_str for ind in date_indicators)
+        
+        # Если есть признаки времени, но нет признаков даты - возвращаем как есть
+        if has_time and not has_date:
+            return value_str
+        
         if ' ' in value_str:
             try:
                 dt = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
@@ -9504,18 +9546,36 @@ class FileBuilderWindow:
             except:
                 pass
         
+        # Проверка на чистое время (без даты): 9:00, 9 ч 00 мин и т.п.
+        time_indicators = [':']
+        date_indicators = ['.', '-', '/']
+        has_time = any(ind in value_str for ind in time_indicators) or ' ч ' in value_str.lower() or value_str.lower().endswith(' ч')
+        has_date = any(ind in value_str for ind in date_indicators)
+        
+        # Если есть признаки времени, но нет признаков даты - возвращаем как есть
+        if has_time and not has_date:
+            return value_str
+        
         if ' ' in value_str:
             value_str = value_str.split(' ')[0]
         
+        # Проверяем, есть ли признаки даты (точки, дефисы, слэши)
+        has_date_format = '/' in value_str or '-' in value_str or '.' in value_str
+        
         try:
-            if value_str.replace(".", "").isdigit():
-                date_val = pd.to_datetime(float(value_str), origin='1899-12-30', unit='D')
-                return date_val.strftime('%d.%m.%Y')
+            # Если это число без признаков даты - возвращаем как есть
+            if value_str.replace(".", "").isdigit() and not has_date_format:
+                return value
             
-            date_val = pd.to_datetime(value_str, dayfirst=True)
-            return date_val.strftime('%d.%m.%Y')
+            # Если есть признаки даты, пытаемся распарсить
+            if has_date_format:
+                date_val = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
+                if pd.notna(date_val):
+                    return date_val.strftime('%d.%m.%Y')
         except:
-            return value
+            pass
+        
+        return value
     
     def format_date_value(self, value):
         """Универсальное форматирование значения с обработкой дат и времени"""
@@ -9544,6 +9604,16 @@ class FileBuilderWindow:
             except:
                 pass
         
+        # Проверка на чистое время (без даты): 9:00, 9 ч 00 мин и т.п.
+        time_indicators = [':']
+        date_indicators = ['.', '-', '/']
+        has_time = any(ind in value_str for ind in time_indicators) or ' ч ' in value_str.lower() or value_str.lower().endswith(' ч')
+        has_date = any(ind in value_str for ind in date_indicators)
+        
+        # Если есть признаки времени, но нет признаков даты - возвращаем как есть
+        if has_time and not has_date:
+            return value_str
+        
         # Если в строке есть время (пробел + время), убираем его
         if ' ' in value_str:
             try:
@@ -9553,13 +9623,14 @@ class FileBuilderWindow:
             except:
                 pass
         
-        # Пытаемся распарсить как дату
-        try:
-            dt = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
-            if pd.notna(dt):
-                return dt.strftime('%d.%m.%Y')
-        except:
-            pass
+        # Проверяем, есть ли признаки даты (точки, дефисы, слэши)
+        if '/' in value_str or '-' in value_str or '.' in value_str:
+            try:
+                dt = pd.to_datetime(value_str, dayfirst=True, errors='coerce')
+                if pd.notna(dt):
+                    return dt.strftime('%d.%m.%Y')
+            except:
+                pass
         
         # Если не получилось - возвращаем как есть
         return value_str
