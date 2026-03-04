@@ -2698,25 +2698,32 @@ class MergeTabTask:
         )
         
         if result:
-            # Временно отключаем обновление для ускорения
+            # Быстрое удаление
             try:
+                # Временно отключаем обновление для ускорения
                 self.files_listbox.config(state=tk.DISABLED)
-                self.window.window.update_idletasks()
                 
-                # Быстрое удаление
+                # Очищаем данные
                 self.file_list.clear()
                 self.files_listbox.delete(0, tk.END)
                 
                 # Обновляем счетчик
                 self.update_file_counter()
                 
-                # Включаем обратно
-                self.files_listbox.config(state=tk.NORMAL)
-                
                 self.log(f"Удалено {count} файлов из списка")
             except Exception as e:
-                self.files_listbox.config(state=tk.NORMAL)
-                raise e
+                self.log(f"Ошибка при очистке: {str(e)}")
+                messagebox.showerror(
+                    "Ошибка", 
+                    f"Не удалось очистить список файлов:\n{str(e)}", 
+                    parent=self.window.window
+                )
+            finally:
+                # Всегда включаем обратно listbox
+                try:
+                    self.files_listbox.config(state=tk.NORMAL)
+                except:
+                    pass
     
     def move_up(self):
         """Переместить файл вверх"""
