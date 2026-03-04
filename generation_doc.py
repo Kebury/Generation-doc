@@ -6867,7 +6867,8 @@ class GenerationDocApp:
                         phrase_end_idx = next_idx
                         continue
                     
-                    # Проверка на инициалы - включаем в фразу и продолжаем поиск
+                    # Проверка на инициалы - включаем в фразу и ЗАВЕРШАЕМ поиск
+                    # Инициалы обычно идут перед фамилиями, которые нужно склонять отдельно
                     clean_no_dots_next = next_clean.replace('.', '')
                     is_next_initial = False
                     if len(clean_no_dots_next) == 1 and clean_no_dots_next.isalpha():
@@ -6877,7 +6878,7 @@ class GenerationDocApp:
                     if is_next_initial:
                         phrase_words.append(next_word)
                         phrase_end_idx = next_idx
-                        continue
+                        break  # ВАЖНО: завершаем поиск, чтобы следующие слова (фамилии) обрабатывались отдельно
                     
                     # Ищем среди разборов следующего слова подходящий (в нужном падеже и согласованный)
                     next_info = None
