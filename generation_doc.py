@@ -6669,9 +6669,34 @@ class GenerationDocApp:
                 else:
                     birth_year_indices.add(i + 1)
         
+        # Предварительный анализ падежей всех слов
+        word_case_info = []  # Список словарей с информацией о каждом слове
+        for word in words:
+            clean_word = word.rstrip(',.;:!?')
+            try:
+                parses = self.morph.parse(clean_word.lower())
+                if parses:
+                    p = parses[0]
+                    word_info = {
+                        'current_case': p.tag.case,  # Текущий падеж слова
+                        'pos': p.tag.POS,  # Часть речи (NOUN, ADJF и т.д.)
+                        'gender': p.tag.gender,  # Род
+                        'number': p.tag.number  # Число
+                    }
+                else:
+                    word_info = None
+            except:
+                word_info = None
+            word_case_info.append(word_info)
+        
         result_words = []
+        skip_indices = set()  # Индексы слов, которые нужно пропустить (уже обработаны)
         
         for idx, word in enumerate(words):
+            # Проверка: уже обработано в составе словосочетания
+            if idx in skip_indices:
+                continue
+            
             if idx in birth_year_indices:
                 result_words.append(word)
                 continue
@@ -6714,6 +6739,52 @@ class GenerationDocApp:
             if clean_no_dots.isupper() and clean_no_dots.isalpha() and 2 <= len(clean_no_dots) <= 4:
                 result_words.append(word)
                 continue
+            
+            # НОВАЯ ЛОГИКА: проверка согласованных словосочетаний
+            # Если текущее слово уже в целевом падеже, проверяем, не является ли оно частью согласованного словосочетания
+            current_info = word_case_info[idx]
+            if current_info and current_info['current_case'] == case:
+                # Слово уже в нужном падеже
+                # Проверяем, есть ли следующие слова, которые тоже в этом падеже (согласованное словосочетание)
+                phrase_words = [word]
+                phrase_end_idx = idx
+                
+                # Смотрим на следующие слова
+                for next_idx in range(idx + 1, len(words)):
+                    next_info = word_case_info[next_idx]
+                    next_word = words[next_idx]
+                    next_clean = next_word.rstrip(',.;:!?')
+                    
+                    # Пропускаем предлоги и союзы
+                    if next_info and next_info['pos'] in ('PREP', 'CONJ'):
+                        phrase_words.append(next_word)
+                        phrase_end_idx = next_idx
+                        continue
+                    
+                    # Если следующее слово тоже в целевом падеже и согласуется по роду/числу
+                    if next_info and next_info['current_case'] == case:
+                        # Проверка согласования: прилагательное с существительным должны совпадать по роду и числу
+                        if (next_info['pos'] in ('NOUN', 'ADJF', 'PRTF') and 
+                            current_info['gender'] == next_info['gender'] and 
+                            current_info['number'] == next_info['number']):
+                            phrase_words.append(next_word)
+                            phrase_end_idx = next_idx
+                        else:
+                            break
+                    else:
+                        break
+                
+                # Если нашли согласованное словосочетание (больше одного слова), оставляем его как есть
+                if phrase_end_idx > idx:
+                    result_words.extend(phrase_words)
+                    # Помечаем все слова фразы как обработанные
+                    for i in range(idx + 1, phrase_end_idx + 1):
+                        skip_indices.add(i)
+                    continue
+                else:
+                    # Одиночное слово уже в нужном падеже - оставляем как есть
+                    result_words.append(word)
+                    continue
             
             word_lower = clean_word.lower()
             result_word = None
