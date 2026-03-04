@@ -1532,6 +1532,7 @@ class TabTask:
         self.last_output_dir = self.app.last_output_dir
         
         self.is_processing = False
+        self.should_stop = False  # Флаг для остановки обработки
         
         self.create_widgets()
     
@@ -1933,7 +1934,7 @@ class TabTask:
             height=48
         )
         self.start_btn.pack()
-        ToolTip(self.start_btn, "Запустить процесс генерации документов")
+        ToolTip(self.start_btn, "Запустить процесс генерации документов\nВо время обработки можно остановить нажатием на эту кнопку")
         
         # ══════════════════════════════════════════════════════════════
         # СЕКЦИЯ 4: ЛОГ ВЫПОЛНЕНИЯ
@@ -2154,9 +2155,12 @@ class TabTask:
         self.log_text.see(tk.INSERT)
     
     def start_processing(self):
-        """Запуск обработки документов"""
+        """Запуск или остановка обработки документов"""
+        # Если обработка идет - останавливаем
         if self.is_processing:
-            messagebox.showinfo("Информация", "Обработка уже выполняется на этой вкладке")
+            self.should_stop = True
+            self.start_btn.configure(text="⏹ Остановка...")
+            self.log("\n⚠️ Запрошена остановка обработки...")
             return
         
         if not self.excel_path.get():
@@ -2183,7 +2187,8 @@ class TabTask:
                 return
         
         self.is_processing = True
-        self.start_btn.configure(state="disabled", text="⏳ Обработка...")
+        self.should_stop = False
+        self.start_btn.configure(text="⏹ Остановить")
         thread = threading.Thread(target=self.process_documents)
         thread.daemon = True
         thread.start()
@@ -2208,7 +2213,9 @@ class MergeTabTask:
         
         self.file_list = []
         self.doc_type = tk.StringVar(value="word")
+        self.use_ocr = tk.BooleanVar(value=True)  # Применять OCR по умолчанию
         self.is_processing = False
+        self.should_stop = False  # Флаг для остановки обработки
         
         self.create_widgets()
     
@@ -2341,6 +2348,37 @@ class MergeTabTask:
         )
         image_merge_radio.pack(anchor="w", pady=3)
         ToolTip(image_merge_radio, "Конвертировать изображения в PDF и объединить в один файл")
+        
+        # OCR настройки
+        ocr_frame = tk.LabelFrame(
+            main_frame, 
+            text=" Настройки обработки PDF ", 
+            font=FONTS["heading"], 
+            padx=12, 
+            pady=12,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        ocr_frame.pack(fill=tk.X, pady=(0, 12))
+        
+        ocr_checkbox = tk.Checkbutton(
+            ocr_frame,
+            text="Применять текстовый слой (OCR) при объединении/конвертации PDF",
+            variable=self.use_ocr,
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            activebackground=COLORS["bg_secondary"],
+            selectcolor=COLORS["bg_primary"]
+        )
+        ocr_checkbox.pack(anchor="w", pady=3)
+        ToolTip(
+            ocr_checkbox, 
+            "Включите для распознавания текста в сканах и изображениях.\n"
+            "Отключите для быстрого объединения/конвертации без распознавания текста.\n\n"
+            "Примечание: OCR увеличивает время обработки, но позволяет копировать текст из PDF."
+        )
         
         # Список файлов
         files_frame = tk.LabelFrame(
@@ -2782,8 +2820,12 @@ class MergeTabTask:
             _log()
     
     def merge_documents(self):
-        """Объединить или конвертировать документы"""
+        """Запуск или остановка объединения/конвертации документов"""
+        # Если обработка идет - останавливаем
         if self.is_processing:
+            self.should_stop = True
+            self.merge_btn.configure(text="⏹ Остановка...")
+            self.log("\n⚠️ Запрошена остановка обработки...")
             return
         
         if not self.file_list:
@@ -2837,21 +2879,31 @@ class MergeTabTask:
         
         # Блокируем кнопку
         self.is_processing = True
-        self.merge_btn.configure(state=tk.DISABLED, text="⏳ Обработка...")
+        self.should_stop = False
+        self.merge_btn.configure(text="⏹ Остановить")
+        
+        # Получаем настройку OCR
+        use_ocr = self.use_ocr.get()
         
         # Запускаем обработку в отдельном потоке
-        thread = threading.Thread(target=self.process_in_thread, args=(doc_type, output_path))
+        thread = threading.Thread(target=self.process_in_thread, args=(doc_type, output_path, use_ocr))
         thread.daemon = True
         thread.start()
     
-    def process_in_thread(self, doc_type, output_path):
+    def process_in_thread(self, doc_type, output_path, use_ocr=True):
         """Обработка документов в отдельном потоке"""
         try:
             self.log("═" * 60)
             self.log("Начало обработки...")
             self.log(f"Режим: {self.get_mode_name(doc_type)}")
             self.log(f"Файлов в очереди: {len(self.file_list)}")
+            self.log(f"Применение OCR: {'Да' if use_ocr else 'Нет (быстрый режим)'}")
             self.log("═" * 60)
+            
+            # Проверка остановки перед началом
+            if self.should_stop:
+                self.log("\n⚠️ Обработка отменена до начала")
+                return
             
             if doc_type == "convert":
                 self.log(f"Папка для сохранения: {output_path}")
@@ -2875,7 +2927,7 @@ class MergeTabTask:
             elif doc_type == "image":
                 self.log(f"Папка для сохранения: {output_path}")
                 converted_files = GenerationDocApp.convert_images_to_pdf(
-                    self.file_list, output_path, self.log
+                    self.file_list, output_path, self.log, use_ocr=use_ocr
                 )
                 
                 self.log("═" * 60)
@@ -2912,7 +2964,7 @@ class MergeTabTask:
             elif doc_type == "image_merge":
                 self.log(f"Файл для сохранения: {output_path}")
                 GenerationDocApp.convert_and_merge_images_to_pdf(
-                    self.file_list, output_path, self.log
+                    self.file_list, output_path, self.log, use_ocr=use_ocr
                 )
                 
                 self.log("═" * 60)
@@ -2934,7 +2986,7 @@ class MergeTabTask:
                     GenerationDocApp.merge_word_documents(self.file_list, output_path, self.log)
                 else:
                     self.log("Объединение PDF документов...")
-                    GenerationDocApp.merge_pdf_documents(self.file_list, output_path, self.log)
+                    GenerationDocApp.merge_pdf_documents(self.file_list, output_path, self.log, use_ocr=use_ocr)
                 
                 self.log("═" * 60)
                 self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
@@ -2950,13 +3002,17 @@ class MergeTabTask:
             self.log(f"⚠️ Частичный успех: {str(w)}")
             messagebox.showwarning("Частичный успех", str(w), parent=self.window.window)
         except Exception as e:
-            self.log(f"❌ ОШИБКА: {str(e)}")
-            messagebox.showerror("Ошибка", f"Ошибка при обработке документов:\n{str(e)}", parent=self.window.window)
+            if not self.should_stop:
+                self.log(f"❌ ОШИБКА: {str(e)}")
+                messagebox.showerror("Ошибка", f"Ошибка при обработке документов:\n{str(e)}", parent=self.window.window)
         finally:
+            if self.should_stop:
+                self.log("\n⏹ Обработка остановлена пользователем")
             self.is_processing = False
+            self.should_stop = False
             try:
                 if self.window.window.winfo_exists():
-                    self.merge_btn.configure(state=tk.NORMAL, text="▶ Объединить (конвертировать)")
+                    self.merge_btn.configure(text="▶ Объединить (конвертировать)")
             except:
                 pass
     
@@ -6241,6 +6297,11 @@ class GenerationDocApp:
                 # Последовательная обработка
                 tab.log("📄 Последовательная обработка...")
                 for task in tasks:
+                    # Проверяем флаг остановки
+                    if tab.should_stop:
+                        tab.log("\n⚠️ Остановка обработки...")
+                        break
+                    
                     result = _process_single_document(task)
                     if result['success']:
                         processed += 1
@@ -6261,6 +6322,14 @@ class GenerationDocApp:
                               for task in tasks}
                     
                     for future in as_completed(futures):
+                        # Проверяем флаг остановки
+                        if tab.should_stop:
+                            tab.log("\n⚠️ Остановка обработки...")
+                            # Отменяем оставшиеся задачи
+                            for f in futures:
+                                f.cancel()
+                            break
+                        
                         try:
                             result = future.result(timeout=300)
                             
@@ -6285,13 +6354,17 @@ class GenerationDocApp:
             
             # === ИТОГИ ===
             tab.log("\n" + "═" * 60)
-            if errors:
+            if tab.should_stop:
+                tab.log("⏹ ОБРАБОТКА ОСТАНОВЛЕНА ПОЛЬЗОВАТЕЛЕМ")
+            elif errors:
                 tab.log("⚠ ОБРАБОТКА ЗАВЕРШЕНА С ОШИБКАМИ")
             else:
                 tab.log("✅ ОБРАБОТКА ЗАВЕРШЕНА УСПЕШНО!")
             tab.log("═" * 60)
             tab.log(f"📊 Статистика:")
             tab.log(f"   Всего обработано:          {processed} файлов")
+            if len(tasks) > processed:
+                tab.log(f"   Не обработано:             {len(tasks) - processed} файлов")
             tab.log(f"   Из них с пометкой _пусто:  {with_empty} файлов")
             if errors:
                 tab.log(f"   Ошибок:                    {len(errors)}")
@@ -6312,7 +6385,12 @@ class GenerationDocApp:
             # Освобождаем память
             gc.collect()
             
-            if errors:
+            if tab.should_stop:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Остановлено", 
+                    f"Обработка остановлена пользователем.\n\nОбработано файлов: {processed} из {len(tasks)}\n\nПапка: {output_folder}"
+                ))
+            elif errors:
                 self.root.after(0, lambda: messagebox.showwarning(
                     "Завершено с ошибками", 
                     f"Обработано: {processed} файлов\nОшибок: {len(errors)}\n\nПодробности в логе."
@@ -6324,18 +6402,20 @@ class GenerationDocApp:
                 ))
             
         except Exception as e:
-            tab.log("\n" + "═" * 60)
-            tab.log("❌ КРИТИЧЕСКАЯ ОШИБКА!")
-            tab.log("═" * 60)
-            tab.log(f"{e}")
-            import traceback
-            tab.log(traceback.format_exc())
-            tab.log("═" * 60)
-            self.root.after(0, lambda: messagebox.showerror("Ошибка", f"Произошла ошибка:\n{e}"))
+            if not tab.should_stop:
+                tab.log("\n" + "═" * 60)
+                tab.log("❌ КРИТИЧЕСКАЯ ОШИБКА!")
+                tab.log("═" * 60)
+                tab.log(f"{e}")
+                import traceback
+                tab.log(traceback.format_exc())
+                tab.log("═" * 60)
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", f"Произошла ошибка:\n{e}"))
         
         finally:
             tab.is_processing = False
-            tab.start_btn.configure(state="normal", text="▶ Начать обработку")
+            tab.should_stop = False
+            tab.start_btn.configure(text="▶ Начать обработку")
             gc.collect()
     
     def decline_female_surname(self, surname, case="nomn"):
@@ -7338,8 +7418,14 @@ class GenerationDocApp:
         return output_path
     
     @staticmethod
-    def merge_pdf_documents(file_paths, output_path, log_callback=None):
-        """Объединение PDF документов с автоматическим OCR для сканов
+    def merge_pdf_documents(file_paths, output_path, log_callback=None, use_ocr=True):
+        """Объединение PDF документов с опциональным OCR для сканов
+        
+        Args:
+            file_paths: список путей к PDF файлам
+            output_path: путь к выходному файлу
+            log_callback: функция для логирования
+            use_ocr: применять ли OCR к PDF файлам без текстового слоя
         
         Автоматически применяет OCR к PDF файлам без текстового слоя
         для обеспечения возможности копирования текста.
@@ -7360,9 +7446,9 @@ class GenerationDocApp:
         
         # Проверяем доступность OCR (только Python библиотеки)
         ocr_status = get_ocr_status()
-        ocr_ready = is_ocr_available()
+        ocr_ready = is_ocr_available() and use_ocr
         
-        if not ocr_ready and log_callback:
+        if use_ocr and not is_ocr_available() and log_callback:
             missing = []
             if not ocr_status['pymupdf']:
                 missing.append("PyMuPDF (pip install pymupdf)")
@@ -7377,6 +7463,8 @@ class GenerationDocApp:
             for m in missing:
                 log_callback(f"    {m}")
             log_callback(f"  ⚠ Сканированные PDF будут объединены без распознавания текста")
+        elif not use_ocr and log_callback:
+            log_callback(f"  ℹ Быстрый режим: OCR отключен")
         
         # Проверяем и применяем OCR к файлам без текстового слоя
         processed_files = []
@@ -7386,7 +7474,14 @@ class GenerationDocApp:
             if log_callback:
                 log_callback(f"  Проверка файла {idx + 1}/{len(file_paths)}: {os.path.basename(pdf_file)}")
             
-            # Проверяем наличие текстового слоя
+            # Проверяем наличие текстового слоя (только если OCR включен)
+            if not use_ocr:
+                # Быстрый режим - просто добавляем файл
+                if log_callback:
+                    log_callback(f"    ℹ Добавлен без OCR")
+                processed_files.append(pdf_file)
+                continue
+            
             has_text = GenerationDocApp.pdf_has_text_layer(pdf_file, log_callback)
             
             if has_text:
@@ -7726,6 +7821,40 @@ class GenerationDocApp:
                 pass
     
     @staticmethod
+    def image_to_pdf_simple(image_path, output_pdf_path, log_callback=None):
+        """Простая конвертация изображения в PDF без OCR (быстрый режим)
+        
+        Args:
+            image_path: путь к файлу изображения
+            output_pdf_path: путь для сохранения PDF
+            log_callback: функция для логирования
+            
+        Returns:
+            str: путь к созданному PDF файлу
+        """
+        if not PIL_AVAILABLE:
+            raise ImportError("Требуется библиотека Pillow: pip install Pillow")
+        
+        # Открываем изображение
+        img = Image.open(image_path)
+        
+        # Конвертируем в RGB если нужно
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Сохраняем как PDF
+        img.save(output_pdf_path, 'PDF', resolution=100.0)
+        img.close()
+        
+        return output_pdf_path
+    
+    @staticmethod
     def image_to_pdf_with_ocr(image_path, output_pdf_path, log_callback=None):
         """Конвертация изображения в PDF с OCR для создания текстового слоя
         
@@ -7845,13 +7974,14 @@ class GenerationDocApp:
         return output_pdf_path
     
     @staticmethod
-    def convert_images_to_pdf(file_paths, output_folder=None, log_callback=None):
-        """Конвертация изображений в PDF с OCR
+    def convert_images_to_pdf(file_paths, output_folder=None, log_callback=None, use_ocr=True):
+        """Конвертация изображений в PDF с опциональным OCR
         
         Args:
             file_paths: список путей к файлам изображений
             output_folder: папка для сохранения PDF (если None, сохраняет рядом с исходным файлом)
             log_callback: функция для логирования
+            use_ocr: применять ли OCR к изображениям
         
         Returns:
             список путей к созданным PDF файлам
@@ -7887,11 +8017,15 @@ class GenerationDocApp:
                 else:
                     pdf_file = os.path.join(os.path.dirname(image_file), base_name + ".pdf")
                 
-                GenerationDocApp.image_to_pdf_with_ocr(image_file, pdf_file, log_callback)
+                if use_ocr:
+                    GenerationDocApp.image_to_pdf_with_ocr(image_file, pdf_file, log_callback)
+                else:
+                    GenerationDocApp.image_to_pdf_simple(image_file, pdf_file, log_callback)
                 
                 converted_files.append(pdf_file)
                 if log_callback:
-                    log_callback(f"  ✓ Создан: {os.path.basename(pdf_file)}")
+                    ocr_status = "с OCR" if use_ocr else "без OCR"
+                    log_callback(f"  ✓ Создан ({ocr_status}): {os.path.basename(pdf_file)}")
                 
             except Exception as e:
                 error_msg = f"{os.path.basename(image_file)}: {str(e)}"
@@ -7914,13 +8048,14 @@ class GenerationDocApp:
         return converted_files
     
     @staticmethod
-    def convert_and_merge_images_to_pdf(file_paths, output_file, log_callback=None):
-        """Конвертация изображений в PDF с OCR и объединение в один файл
+    def convert_and_merge_images_to_pdf(file_paths, output_file, log_callback=None, use_ocr=True):
+        """Конвертация изображений в PDF с опциональным OCR и объединение в один файл
         
         Args:
             file_paths: список путей к файлам изображений
             output_file: путь к результирующему PDF файлу
             log_callback: функция для логирования
+            use_ocr: применять ли OCR к изображениям
         """
         if not file_paths:
             raise ValueError("Список файлов пуст")
@@ -7943,7 +8078,8 @@ class GenerationDocApp:
         try:
             total = len(file_paths)
             if log_callback:
-                log_callback(f"Конвертация {total} изображений с OCR...")
+                ocr_mode = "с OCR" if use_ocr else "без OCR (быстрый режим)"
+                log_callback(f"Конвертация {total} изображений {ocr_mode}...")
             
             for idx, image_file in enumerate(file_paths, 1):
                 try:
@@ -7958,8 +8094,11 @@ class GenerationDocApp:
                     base_name = os.path.splitext(os.path.basename(image_file))[0]
                     temp_pdf = os.path.join(temp_dir, base_name + ".pdf")
                     
-                    # Используем конвертацию с OCR
-                    GenerationDocApp.image_to_pdf_with_ocr(image_file, temp_pdf, log_callback)
+                    # Используем конвертацию с OCR или без
+                    if use_ocr:
+                        GenerationDocApp.image_to_pdf_with_ocr(image_file, temp_pdf, log_callback)
+                    else:
+                        GenerationDocApp.image_to_pdf_simple(image_file, temp_pdf, log_callback)
                     
                     if os.path.exists(temp_pdf):
                         temp_pdf_files.append(temp_pdf)
