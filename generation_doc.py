@@ -491,7 +491,7 @@ def parse_drop_files(data):
 
 def setup_file_drop(entry_widget, string_var, file_types=None, on_drop_callback=None, parent_window=None):
     """
-    Настройка drag & drop для поля ввода файла.
+    Настройка drag & drop для поля ввода файла с визуальной индикацией.
     
     Args:
         entry_widget: Виджет Entry/CTkEntry для отображения пути
@@ -504,13 +504,60 @@ def setup_file_drop(entry_widget, string_var, file_types=None, on_drop_callback=
         return
     
     try:
+        # Определяем виджет для регистрации drop
         actual_widget = entry_widget
-        if hasattr(entry_widget, '_entry'):
-            actual_widget = entry_widget._entry
         
+        # Для CTkEntry пробуем разные варианты
+        if hasattr(entry_widget, '_entry'):
+            # Пробуем получить внутренний Entry
+            actual_widget = entry_widget._entry
+        elif hasattr(entry_widget, 'winfo_children'):
+            # Иногда нужен первый дочерний виджет
+            children = entry_widget.winfo_children()
+            if children:
+                actual_widget = children[0]
+        
+        # Сохраняем исходные цвета для восстановления
+        original_bg = None
+        original_state = None
+        
+        # Сохраняем текущее состояние
+        if hasattr(entry_widget, 'cget'):
+            try:
+                original_bg = entry_widget.cget('fg_color')
+                original_state = entry_widget.cget('state')
+            except:
+                original_bg = COLORS["bg_tertiary"]
+                original_state = 'normal'
+        
+        # Регистрируем виджет для приёма файлов
         actual_widget.drop_target_register(DND_FILES)
         
+        def on_drag_enter(event):
+            """Визуальная индикация при наведении файла"""
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=COLORS["primary_hover"])
+            except:
+                pass
+        
+        def on_drag_leave(event):
+            """Восстановление цвета при уходе курсора"""
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=original_bg)
+            except:
+                pass
+        
         def on_drop(event):
+            """Обработка drop файла"""
+            # Восстанавливаем цвет
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=original_bg)
+            except:
+                pass
+            
             files = parse_drop_files(event.data)
             
             if not files:
@@ -518,6 +565,7 @@ def setup_file_drop(entry_widget, string_var, file_types=None, on_drop_callback=
             
             file_path = files[0]
             
+            # Проверка типа файла
             if file_types:
                 valid = any(file_path.lower().endswith(ext) for ext in file_types)
                 if not valid:
@@ -530,11 +578,35 @@ def setup_file_drop(entry_widget, string_var, file_types=None, on_drop_callback=
                     )
                     return
             
+            # Временно делаем поле редактируемым для установки значения
+            was_readonly = False
+            if original_state == 'readonly':
+                try:
+                    entry_widget.configure(state='normal')
+                    was_readonly = True
+                except:
+                    pass
+            
+            # Устанавливаем путь
             string_var.set(file_path)
             
+            # Возвращаем readonly если было
+            if was_readonly:
+                try:
+                    entry_widget.configure(state='readonly')
+                except:
+                    pass
+            
+            # Вызываем callback
             if on_drop_callback:
-                on_drop_callback(file_path)
+                try:
+                    on_drop_callback(file_path)
+                except Exception as e:
+                    print(f"Ошибка в callback: {e}")
         
+        # Привязываем события drag-and-drop
+        actual_widget.dnd_bind('<<DragEnter>>', on_drag_enter)
+        actual_widget.dnd_bind('<<DragLeave>>', on_drag_leave)
         actual_widget.dnd_bind('<<Drop>>', on_drop)
         
     except Exception as e:
@@ -542,7 +614,7 @@ def setup_file_drop(entry_widget, string_var, file_types=None, on_drop_callback=
 
 def setup_folder_drop(entry_widget, string_var, on_drop_callback=None, parent_window=None):
     """
-    Настройка drag & drop для поля ввода папки.
+    Настройка drag & drop для поля ввода папки с визуальной индикацией.
     
     Args:
         entry_widget: Виджет Entry/CTkEntry для отображения пути
@@ -558,9 +630,41 @@ def setup_folder_drop(entry_widget, string_var, on_drop_callback=None, parent_wi
         if hasattr(entry_widget, '_entry'):
             actual_widget = entry_widget._entry
         
+        # Сохраняем исходные цвета
+        original_bg = None
+        if hasattr(entry_widget, 'cget'):
+            try:
+                original_bg = entry_widget.cget('fg_color')
+            except:
+                original_bg = COLORS["bg_tertiary"]
+        
         actual_widget.drop_target_register(DND_FILES)
         
+        def on_drag_enter(event):
+            """Визуальная индикация при наведении"""
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=COLORS["success_hover"])
+            except:
+                pass
+        
+        def on_drag_leave(event):
+            """Восстановление цвета"""
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=original_bg)
+            except:
+                pass
+        
         def on_drop(event):
+            """Обработка drop папки/файла"""
+            # Восстанавливаем цвет
+            try:
+                if hasattr(entry_widget, 'configure'):
+                    entry_widget.configure(fg_color=original_bg)
+            except:
+                pass
+            
             files = parse_drop_files(event.data)
             
             if not files:
@@ -569,6 +673,7 @@ def setup_folder_drop(entry_widget, string_var, on_drop_callback=None, parent_wi
             # Берём первый путь
             path = files[0]
             
+            # Если это файл, берём его папку
             if os.path.isfile(path):
                 path = os.path.dirname(path)
             
@@ -578,6 +683,9 @@ def setup_folder_drop(entry_widget, string_var, on_drop_callback=None, parent_wi
             if on_drop_callback:
                 on_drop_callback(path)
         
+        # Привязываем события
+        actual_widget.dnd_bind('<<DragEnter>>', on_drag_enter)
+        actual_widget.dnd_bind('<<DragLeave>>', on_drag_leave)
         actual_widget.dnd_bind('<<Drop>>', on_drop)
         
     except Exception as e:
@@ -1652,7 +1760,7 @@ class TabTask:
         excel_entry.grid(row=0, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
         enable_field_shortcuts(excel_entry, readonly=True)
         add_context_menu(excel_entry, readonly=True)
-        ToolTip(excel_entry, "Путь к Excel файлу с данными\n💡 Поддерживается перетаскивание файлов")
+        ToolTip(excel_entry, "Путь к Excel файлу с данными")
         
         def on_excel_drop(file_path):
             self.last_excel_dir = os.path.dirname(file_path)
@@ -1710,7 +1818,7 @@ class TabTask:
         word_entry.grid(row=1, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
         enable_field_shortcuts(word_entry, readonly=True)
         add_context_menu(word_entry, readonly=True)
-        ToolTip(word_entry, "Путь к шаблону Word документа\n💡 Поддерживается перетаскивание файлов")
+        ToolTip(word_entry, "Путь к шаблону Word документа")
         
         def on_word_drop(file_path):
             self.last_word_dir = os.path.dirname(file_path)
@@ -1767,7 +1875,7 @@ class TabTask:
         output_entry.grid(row=2, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
         enable_field_shortcuts(output_entry)
         add_context_menu(output_entry)
-        ToolTip(output_entry, "Путь к папке для сохранения результатов\n💡 Поддерживается перетаскивание папок")
+        ToolTip(output_entry, "Путь к папке для сохранения результатов")
         
         def on_output_drop(folder_path):
             self.last_output_dir = folder_path
@@ -2383,7 +2491,7 @@ class MergeTabTask:
         # Список файлов
         files_frame = tk.LabelFrame(
             main_frame, 
-            text=" Файлы для объединения ", 
+            text=" Файлы ", 
             font=FONTS["heading"], 
             padx=12, 
             pady=12,
@@ -2420,9 +2528,19 @@ class MergeTabTask:
             command=self.add_files, 
             style="primary",
             width=12, 
-            tooltip="Добавить файлы для объединения"
+            tooltip="Добавить файлы в конец списка"
         )
         add_btn.pack(side=tk.LEFT, padx=2)
+        
+        insert_btn = create_modern_button(
+            btn_files_frame, 
+            text="⊕ Вставить после", 
+            command=self.insert_files_after, 
+            style="primary",
+            width=14, 
+            tooltip="Добавить файлы после выбранного элемента"
+        )
+        insert_btn.pack(side=tk.LEFT, padx=2)
         
         up_btn = create_modern_button(
             btn_files_frame, 
@@ -2491,10 +2609,10 @@ class MergeTabTask:
         
         # Подсказка о Drag and Drop
         if TKDND_AVAILABLE:
-            hint_text = "💡 Вы можете перетаскивать файлы в список"
+            hint_text = "💡 Вы можете перетаскивать файлы из системы в нужное место списка"
             hint_color = COLORS["text_secondary"]
         else:
-            hint_text = "ℹ️ Установите tkinterdnd2 для перетаскивания файлов: pip install tkinterdnd2"
+            hint_text = "💡 Установите tkinterdnd2 для добавления файлов перетаскиванием: pip install tkinterdnd2"
             hint_color = COLORS["warning"]
         
         hint_label = tk.Label(
@@ -2572,19 +2690,112 @@ class MergeTabTask:
     
     def setup_drag_and_drop(self):
         """Настройка поддержки перетаскивания файлов"""
-        if not TKDND_AVAILABLE:
-            return
+        # Внешний drag-and-drop (файлов из системы)
+        if TKDND_AVAILABLE:
+            try:
+                self.files_listbox.drop_target_register(DND_FILES)
+                self.files_listbox.dnd_bind('<<Drop>>', self.on_drop)
+            except Exception as e:
+                pass
         
-        try:
-            self.files_listbox.drop_target_register(DND_FILES)
-            self.files_listbox.dnd_bind('<<Drop>>', self.on_drop)
-        except Exception as e:
-            pass
+        # Внутренний drag-and-drop (перестановка элементов в списке) - работает всегда
+        self.drag_data = {"index": None, "y": 0}
+        
+        def on_drag_start(event):
+            # Запоминаем индекс элемента под курсором
+            index = self.files_listbox.nearest(event.y)
+            if index >= 0 and index < len(self.file_list):
+                self.drag_data["index"] = index
+                self.drag_data["y"] = event.y
+        
+        def on_drag_motion(event):
+            # Проверяем, что перетаскивание началось
+            if self.drag_data["index"] is None:
+                return
+            
+            # Определяем новую позицию
+            new_index = self.files_listbox.nearest(event.y)
+            old_index = self.drag_data["index"]
+            
+            if new_index != old_index and 0 <= new_index < len(self.file_list):
+                # Перемещаем элемент
+                item = self.file_list.pop(old_index)
+                self.file_list.insert(new_index, item)
+                
+                # Обновляем listbox
+                self.files_listbox.delete(old_index)
+                self.files_listbox.insert(new_index, os.path.basename(item))
+                self.files_listbox.selection_clear(0, tk.END)
+                self.files_listbox.selection_set(new_index)
+                
+                # Обновляем сохраненный индекс
+                self.drag_data["index"] = new_index
+        
+        def on_drag_end(event):
+            # Сбрасываем данные перетаскивания
+            self.drag_data["index"] = None
+        
+        # Привязываем события
+        self.files_listbox.bind('<Button-1>', on_drag_start)
+        self.files_listbox.bind('<B1-Motion>', on_drag_motion)
+        self.files_listbox.bind('<ButtonRelease-1>', on_drag_end)
     
     def on_drop(self, event):
-        """Обработка перетаскивания файлов"""
+        """Обработка перетаскивания файлов из системы"""
         files = parse_drop_files(event.data)  # Используем глобальную функцию
         doc_type = self.doc_type.get()
+        
+        # Определяем позицию вставки по координатам курсора
+        try:
+            # Получаем координаты мыши относительно listbox
+            widget_x = self.files_listbox.winfo_pointerx() - self.files_listbox.winfo_rootx()
+            widget_y = self.files_listbox.winfo_pointery() - self.files_listbox.winfo_rooty()
+            
+            # Если список пустой, добавляем в начало
+            if not self.file_list:
+                drop_index = 0
+            else:
+                # Получаем индекс элемента под курсором
+                drop_index = self.files_listbox.nearest(widget_y)
+                
+                # Проверяем, находится ли курсор над текстом файла или справа в пустой области
+                try:
+                    bbox = self.files_listbox.bbox(drop_index)
+                    if bbox:
+                        item_x = bbox[0]
+                        item_y = bbox[1]
+                        item_width = bbox[2]
+                        item_height = bbox[3]
+                        
+                        # Получаем текст элемента для определения ширины текста
+                        item_text = self.files_listbox.get(drop_index)
+                        
+                        # Примерная ширина одного символа (можно использовать font.measure для точности)
+                        char_width = 8  # Примерная ширина символа
+                        text_width = len(item_text) * char_width + 10  # +10 для отступов
+                        
+                        # Если курсор справа от текста (в пустой области), добавляем в конец
+                        if widget_x > item_x + text_width:
+                            drop_index = len(self.file_list)
+                        # Если курсор над текстом, определяем где вставить (до или после)
+                        else:
+                            # Если курсор в нижней половине элемента, вставляем после
+                            if widget_y > item_y + item_height / 2:
+                                drop_index += 1
+                            # Иначе вставляем перед элементом (drop_index остается как есть)
+                    else:
+                        # Если не удалось получить bbox, добавляем в конец
+                        drop_index = len(self.file_list)
+                except:
+                    # Если ошибка с bbox, добавляем в конец
+                    drop_index = len(self.file_list)
+                
+                # Ограничиваем индекс размером списка
+                if drop_index > len(self.file_list):
+                    drop_index = len(self.file_list)
+        except Exception as e:
+            # В случае ошибки добавляем в конец
+            drop_index = len(self.file_list)
         
         added_count = 0
         invalid_count = 0
@@ -2604,9 +2815,15 @@ class MergeTabTask:
                 continue
             
             if file_path not in self.file_list:
-                self.file_list.append(file_path)
-                self.files_listbox.insert(tk.END, os.path.basename(file_path))
+                # Вставляем в определенную позицию
+                self.file_list.insert(drop_index, file_path)
+                self.files_listbox.insert(drop_index, os.path.basename(file_path))
+                drop_index += 1  # Увеличиваем индекс для следующего файла
                 added_count += 1
+                
+                # Предзагрузка Word файлов
+                if file_path.lower().endswith(('.docx', '.doc')):
+                    word_preload_manager.preload(file_path)
         
         self.update_file_counter()
         
@@ -2624,6 +2841,9 @@ class MergeTabTask:
                 f"Принимаются только {file_type} файлы.",
                 parent=self.window.window
             )
+        
+        if added_count > 0:
+            self.log(f"Добавлено файлов перетаскиванием: {added_count}")
     
     def add_files(self):
         """Добавить файлы в список"""
@@ -2644,7 +2864,7 @@ class MergeTabTask:
             filetypes = [("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
         
         files = filedialog.askopenfilenames(
-            title="Выберите файлы для объединения",
+            title="Выберите файлы",
             filetypes=filetypes
         )
         
@@ -2676,6 +2896,59 @@ class MergeTabTask:
         if added_count > 0:
             self.log(f"Добавлено файлов: {added_count}")
     
+    def insert_files_after(self):
+        """Вставить файлы после выбранного элемента"""
+        selection = self.files_listbox.curselection()
+        if not selection:
+            messagebox.showinfo(
+                "Информация", 
+                "Выберите элемент, после которого нужно вставить файлы.\n\nЕсли элемент не выбран, файлы будут добавлены в конец списка.",
+                parent=self.window.window
+            )
+            self.add_files()
+            return
+        
+        insert_index = selection[0] + 1
+        
+        doc_type = self.doc_type.get()
+        if doc_type in ["word", "convert", "convert_merge"]:
+            filetypes = [("Word файлы", "*.docx"), ("Все файлы", "*.*")]
+        elif doc_type in ["image", "image_merge"]:
+            filetypes = [
+                ("Изображения", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif *.gif"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("BMP", "*.bmp"),
+                ("TIFF", "*.tiff *.tif"),
+                ("GIF", "*.gif"),
+                ("Все файлы", "*.*")
+            ]
+        else:
+            filetypes = [("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
+        
+        files = filedialog.askopenfilenames(
+            title="Выберите файлы для вставки",
+            filetypes=filetypes
+        )
+        
+        if not files:
+            return
+        
+        added_count = 0
+        for file in files:
+            if file not in self.file_list:
+                self.file_list.insert(insert_index, file)
+                self.files_listbox.insert(insert_index, os.path.basename(file))
+                insert_index += 1
+                added_count += 1
+                
+                if file.lower().endswith(('.docx', '.doc')):
+                    word_preload_manager.preload(file)
+        
+        self.update_file_counter()
+        if added_count > 0:
+            self.log(f"Вставлено файлов: {added_count}")
+    
     def remove_file(self):
         """Удалить выбранный файл"""
         selection = self.files_listbox.curselection()
@@ -2699,9 +2972,15 @@ class MergeTabTask:
         
         if result:
             try:
-                # Очищаем данные
+                # Сохраняем размер перед очисткой
+                listbox_size = self.files_listbox.size()
+                
+                # Очищаем данные  
                 self.file_list.clear()
-                self.files_listbox.delete(0, self.files_listbox.size())
+                
+                # Явно удаляем все элементы из listbox
+                if listbox_size > 0:
+                    self.files_listbox.delete(0, listbox_size - 1)
                 
                 # Обновляем счетчик
                 self.update_file_counter()
@@ -2718,44 +2997,61 @@ class MergeTabTask:
     def move_up(self):
         """Переместить файл вверх"""
         selection = self.files_listbox.curselection()
-        if selection and selection[0] > 0:
-            index = selection[0]
-            # Меняем местами в списке
-            self.file_list[index], self.file_list[index-1] = self.file_list[index-1], self.file_list[index]
+        if not selection or selection[0] == 0:
+            return
             
-            # Меняем местами в listbox напрямую (быстрее чем refresh_listbox)
-            file1 = os.path.basename(self.file_list[index])
-            file2 = os.path.basename(self.file_list[index-1])
-            self.files_listbox.delete(index-1, index)
-            self.files_listbox.insert(index-1, file2)
-            self.files_listbox.insert(index-1, file1)
-            self.files_listbox.selection_set(index-1)
+        index = selection[0]
+        
+        # Меняем местами в списке
+        self.file_list[index], self.file_list[index-1] = self.file_list[index-1], self.file_list[index]
+        
+        # Перерисовываем только затронутые элементы
+        self.files_listbox.delete(index-1, index)
+        self.files_listbox.insert(index-1, os.path.basename(self.file_list[index-1]))
+        self.files_listbox.insert(index, os.path.basename(self.file_list[index]))
+        
+        # Выделяем перемещённый элемент
+        self.files_listbox.selection_clear(0, tk.END)
+        self.files_listbox.selection_set(index-1)
+        self.files_listbox.see(index-1)
     
     def move_down(self):
         """Переместить файл вниз"""
         selection = self.files_listbox.curselection()
-        if selection and selection[0] < len(self.file_list) - 1:
-            index = selection[0]
-            # Меняем местами в списке
-            self.file_list[index], self.file_list[index+1] = self.file_list[index+1], self.file_list[index]
+        if not selection or selection[0] >= len(self.file_list) - 1:
+            return
             
-            # Меняем местами в listbox напрямую (быстрее чем refresh_listbox)
-            file1 = os.path.basename(self.file_list[index])
-            file2 = os.path.basename(self.file_list[index+1])
-            self.files_listbox.delete(index, index+1)
-            self.files_listbox.insert(index, file2)
-            self.files_listbox.insert(index, file1)
-            self.files_listbox.selection_set(index+1)
+        index = selection[0]
+        
+        # Меняем местами в списке
+        self.file_list[index], self.file_list[index+1] = self.file_list[index+1], self.file_list[index]
+        
+        # Перерисовываем только затронутые элементы
+        self.files_listbox.delete(index, index+1)
+        self.files_listbox.insert(index, os.path.basename(self.file_list[index]))
+        self.files_listbox.insert(index+1, os.path.basename(self.file_list[index+1]))
+        
+        # Выделяем перемещённый элемент
+        self.files_listbox.selection_clear(0, tk.END)
+        self.files_listbox.selection_set(index+1)
+        self.files_listbox.see(index+1)
     
     def refresh_listbox(self):
         """Обновить отображение списка файлов"""
+        # Сохраняем размер до очистки
+        listbox_size = self.files_listbox.size()
+        
         # Оптимизация для больших списков
         if len(self.file_list) > 50:
             self.files_listbox.config(state=tk.DISABLED)
         
-        self.files_listbox.delete(0, tk.END)
-        for file in self.file_list:
-            self.files_listbox.insert(tk.END, os.path.basename(file))
+        # Очищаем listbox
+        if listbox_size > 0:
+            self.files_listbox.delete(0, listbox_size - 1)
+        
+        # Заполняем заново
+        for i, file in enumerate(self.file_list):
+            self.files_listbox.insert(i, os.path.basename(file))
         
         if len(self.file_list) > 50:
             self.files_listbox.config(state=tk.NORMAL)
@@ -5360,6 +5656,9 @@ class GenerationDocApp:
         self.tab_counter = 0  # Счетчик для уникальных ID вкладок
         self.max_tabs = 5  # Максимальное количество вкладок
         
+        # Текущий загруженный пресет
+        self.current_preset_name = None
+        
         self.create_widgets()
         
         self.add_tab()
@@ -5590,6 +5889,11 @@ class GenerationDocApp:
         try:
             with open(preset_path, 'w', encoding='utf-8') as f:
                 json.dump(preset, f, ensure_ascii=False, indent=2)
+            
+            # Обновляем имя текущего пресета и индикатор
+            self.current_preset_name = preset_name
+            self.update_preset_indicator()
+            
             current_tab.log(f"✓ Пресет '{preset_name}' успешно сохранен")
             messagebox.showinfo("Успех", f"Пресет '{preset_name}' сохранен!")
         except Exception as e:
@@ -5640,12 +5944,58 @@ class GenerationDocApp:
             self.save_config()
             
             preset_name = os.path.basename(preset_path).replace('.json', '')
+            
+            # Сохраняем имя текущего пресета и обновляем индикатор
+            self.current_preset_name = preset_name
+            self.update_preset_indicator()
+            
             current_tab.log(f"✓ Пресет '{preset_name}' успешно загружен")
             messagebox.showinfo("Успех", f"Пресет '{preset_name}' загружен!")
             
         except Exception as e:
             current_tab.log(f"❌ Ошибка загрузки пресета: {e}")
             messagebox.showerror("Ошибка", f"Не удалось загрузить пресет:\n{e}")
+    
+    def update_preset_indicator(self):
+        """Обновление индикатора текущего пресета"""
+        if self.current_preset_name:
+            # Показываем индикатор с именем пресета
+            self.preset_indicator_label.config(
+                text=f"📋 {self.current_preset_name}",
+                cursor="hand2"
+            )
+            self.preset_indicator_frame.pack(side=tk.LEFT, padx=SPACING["sm"])
+            
+            # Добавляем tooltip с дополнительной информацией
+            tooltip_text = f"Текущий пресет: {self.current_preset_name}\n\n💡 Нажмите '💾' чтобы сохранить изменения\n💡 Нажмите '📂' чтобы загрузить другой пресет\n💡 Клик для сброса индикатора"
+            try:
+                if hasattr(self, '_preset_tooltip'):
+                    self._preset_tooltip.text = tooltip_text
+                else:
+                    self._preset_tooltip = ToolTip(self.preset_indicator_label, tooltip_text)
+            except:
+                pass
+            
+            # Добавляем обработчик клика для сброса индикатора
+            def on_click(event):
+                if messagebox.askyesno(
+                    "Сброс индикатора пресета",
+                    f"Вы работаете с пресетом '{self.current_preset_name}'.\n\nСбросить индикатор?\n(Это не изменит текущие настройки)",
+                    parent=self.root
+                ):
+                    self.clear_preset_indicator()
+            
+            # Удаляем старые привязки и добавляем новую
+            self.preset_indicator_label.unbind("<Button-1>")
+            self.preset_indicator_label.bind("<Button-1>", on_click)
+        else:
+            # Скрываем индикатор если пресет не загружен
+            self.preset_indicator_frame.pack_forget()
+    
+    def clear_preset_indicator(self):
+        """Очистка индикатора пресета"""
+        self.current_preset_name = None
+        self.update_preset_indicator()
         
     def create_widgets(self):
         """Создание современного интерфейса с системой вкладок"""
@@ -5697,6 +6047,24 @@ class GenerationDocApp:
         self.loading_label.pack(side=tk.LEFT)
         
         self.loading_tooltip = LoadingProgressTooltip(self.loading_label, self)
+        
+        # Индикатор текущего пресета (в левой части заголовка)
+        self.preset_indicator_frame = tk.Frame(subtitle_frame, bg=COLORS["primary"])
+        self.preset_indicator_frame.pack(side=tk.LEFT, padx=SPACING["md"])
+        
+        self.preset_indicator_label = tk.Label(
+            self.preset_indicator_frame,
+            text="",
+            font=FONTS["small"],
+            bg=COLORS["primary"],
+            fg=COLORS["accent_light"],
+            padx=SPACING["xs"],
+            pady=2
+        )
+        self.preset_indicator_label.pack()
+        
+        # Изначально скрываем индикатор
+        self.preset_indicator_frame.pack_forget()
         
         # Правая часть - кнопки и автор
         right_section = tk.Frame(header_frame, bg=COLORS["primary"])
@@ -8579,6 +8947,7 @@ class ExcelConstructorWindow:
         
         self.source_df = None
         self.source_file = None
+        self.source_file_path = tk.StringVar(value="")
         
         self.create_widgets()
     
@@ -8589,9 +8958,32 @@ class ExcelConstructorWindow:
         
         tk.Label(top_frame, text="Исходный файл:", bg=COLORS["primary"], fg="white", font=FONTS["heading"]).pack(side=tk.LEFT, padx=(15, 8), pady=18)
         
-        self.file_label = tk.Label(top_frame, text="Файл не выбран", bg="white", font=FONTS["body"], relief=tk.SOLID, borderwidth=1, anchor=tk.W)
-        self.file_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=18)
-        ToolTip(self.file_label, "Путь к загруженному Excel файлу")
+        # Поле с поддержкой drag-and-drop
+        self.file_entry = ctk.CTkEntry(
+            top_frame,
+            textvariable=self.source_file_path,
+            font=FONTS["body"],
+            state="readonly",
+            fg_color="white",
+            text_color=COLORS["text_primary"],
+            border_color=COLORS["border"],
+            height=40,
+            placeholder_text="Файл не выбран"
+        )
+        self.file_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=18)
+        ToolTip(self.file_entry, "Путь к загруженному Excel файлу")
+        
+        # Настройка drag-and-drop для поля
+        def on_excel_drop(file_path):
+            self.load_excel_file(file_path)
+        
+        setup_file_drop(
+            self.file_entry,
+            self.source_file_path,
+            file_types=['.xlsx', '.xls'],
+            on_drop_callback=on_excel_drop,
+            parent_window=self.window
+        )
         
         self.rows_label = tk.Label(top_frame, text="", bg=COLORS["primary"], font=FONTS["small"], fg="white")
         self.rows_label.pack(side=tk.LEFT, padx=8)
@@ -8704,6 +9096,7 @@ class ExcelConstructorWindow:
         tree_container.pack(fill=tk.BOTH, expand=True)
     
     def load_excel(self):
+        """Загрузка Excel файла через диалог"""
         # Пытаемся использовать кэш из главного приложения
         if hasattr(self.main_app, '_pandas_loaded') and self.main_app._pandas_loaded:
             pd = self.main_app._pandas
@@ -8718,6 +9111,17 @@ class ExcelConstructorWindow:
         if not file_path:
             return
         
+        self.load_excel_file(file_path, pd)
+    
+    def load_excel_file(self, file_path, pd=None):
+        """Загрузка Excel файла по пути (используется и для drag-and-drop)"""
+        # Если pandas не передан, загружаем
+        if pd is None:
+            if hasattr(self.main_app, '_pandas_loaded') and self.main_app._pandas_loaded:
+                pd = self.main_app._pandas
+            else:
+                import pandas as pd
+        
         try:
             self.source_df = pd.read_excel(file_path)
             
@@ -8731,8 +9135,8 @@ class ExcelConstructorWindow:
             self.source_df = self.source_df.fillna("")
             
             self.source_file = file_path
+            self.source_file_path.set(file_path)
             
-            self.file_label.config(text=os.path.basename(file_path))
             self.display_preview()
             
             # Активируем кнопки
@@ -8740,7 +9144,7 @@ class ExcelConstructorWindow:
             self.preview_btn.configure(state=tk.NORMAL)
             
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка при загрузке файла:\n{str(e)}")
+            messagebox.showerror("Ошибка", f"Ошибка при загрузке файла:\n{str(e)}", parent=self.window)
     
     def preview_source_file(self):
         """Предварительный просмотр исходного Excel файла"""
