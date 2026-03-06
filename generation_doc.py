@@ -158,6 +158,7 @@ COLORS = {
     "text_secondary": "#475569",
     "text_tertiary": "#94A3B8",
     "text_disabled": "#CBD5E1",
+    "text_on_primary": "#FFFFFF",
     "border": "#E2E8F0",
     "border_focus": "#3B82F6",
     "border_hover": "#CBD5E1",
@@ -2325,6 +2326,19 @@ class MergeTabTask:
         self.is_processing = False
         self.should_stop = False  # Флаг для остановки обработки
         
+        # Новые параметры для качества и размещения
+        self.ocr_resolution = tk.StringVar(value="1.5")  # Разрешение OCR (1.0-3.0)
+        self.max_image_size = tk.StringVar(value="4000")  # Макс. размер изображения
+        self.fit_mode = tk.StringVar(value="центр")  # Режим размещения
+        
+        # Параметры нумерации/штампа
+        self.numbering_line1 = tk.StringVar(value="")  # Строка 1
+        self.numbering_line2 = tk.StringVar(value="")  # Строка 2 (с автоинкрементом)
+        self.numbering_line3 = tk.StringVar(value="")  # Строка 3
+        self.numbering_position = tk.StringVar(value="правый-нижний")  # Позиция штампа
+        self.numbering_border = tk.BooleanVar(value=True)  # Обводить в рамку
+        self.numbering_increment_mode = tk.StringVar(value="per_document")  # Режим нумерации: per_document или per_page
+        
         self.create_widgets()
     
     def create_widgets(self):
@@ -2487,6 +2501,405 @@ class MergeTabTask:
             "Отключите для быстрого объединения/конвертации без распознавания текста.\n\n"
             "Примечание: OCR увеличивает время обработки, но позволяет копировать текст из PDF."
         )
+        
+        # ═══ КАЧЕСТВО И РАЗМЕЩЕНИЕ ═══
+        quality_subframe = tk.Frame(ocr_frame, bg=COLORS["bg_secondary"])
+        quality_subframe.pack(fill=tk.X, pady=(8, 0))
+        
+        # Разрешение OCR
+        ocr_res_frame = tk.Frame(quality_subframe, bg=COLORS["bg_secondary"])
+        ocr_res_frame.pack(fill=tk.X, pady=3)
+        
+        tk.Label(
+            ocr_res_frame, 
+            text="Качество OCR (разрешение):", 
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        ocr_res_entry = ctk.CTkEntry(
+            ocr_res_frame,
+            textvariable=self.ocr_resolution,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            width=80,
+            height=28
+        )
+        ocr_res_entry.pack(side=tk.LEFT, padx=(0, 5))
+        enable_field_shortcuts(ocr_res_entry)
+        add_context_menu(ocr_res_entry)
+        ToolTip(
+            ocr_res_entry,
+            "Множитель разрешения для OCR (1.0-3.0):\n"
+            "• 1.0 = быстро, низкое качество\n"
+            "• 1.5 = оптимально (по умолчанию)\n"
+            "• 2.0-3.0 = медленно, высокое качество"
+        )
+        
+        tk.Label(
+            ocr_res_frame,
+            text="(1.0-3.0, по умолч. 1.5)",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"]
+        ).pack(side=tk.LEFT)
+        
+        # Максимальный размер изображения
+        img_size_frame = tk.Frame(quality_subframe, bg=COLORS["bg_secondary"])
+        img_size_frame.pack(fill=tk.X, pady=3)
+        
+        tk.Label(
+            img_size_frame,
+            text="Макс. размер изображения (px):",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        img_size_entry = ctk.CTkEntry(
+            img_size_frame,
+            textvariable=self.max_image_size,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            width=80,
+            height=28
+        )
+        img_size_entry.pack(side=tk.LEFT, padx=(0, 5))
+        enable_field_shortcuts(img_size_entry)
+        add_context_menu(img_size_entry)
+        ToolTip(
+            img_size_entry,
+            "Максимальный размер изображения в пикселях:\n"
+            "• 4000 = оптимально (по умолчанию)\n"
+            "• 0 или пусто = без ограничений (полное качество)\n"
+            "• Меньше = быстрее, но ниже качество"
+        )
+        
+        tk.Label(
+            img_size_frame,
+            text="(0=без огр., 4000 по умолч.)",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"]
+        ).pack(side=tk.LEFT)
+        
+        # Режим размещения на листе
+        fit_mode_frame = tk.Frame(quality_subframe, bg=COLORS["bg_secondary"])
+        fit_mode_frame.pack(fill=tk.X, pady=3)
+        
+        tk.Label(
+            fit_mode_frame,
+            text="Размещение на листе:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=20,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        fit_mode_options = [
+            ("Центрировать", "центр"),
+            ("Заполнить лист", "заполнить"),
+            ("Вписать в лист", "вписать")
+        ]
+        
+        fit_mode_combo = ctk.CTkComboBox(
+            fit_mode_frame,
+            values=[opt[0] for opt in fit_mode_options],
+            state="readonly",
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_hover"],
+            dropdown_fg_color=COLORS["bg_primary"],
+            width=150,
+            height=28
+        )
+        fit_mode_combo.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Устанавливаем соответствие между label и value
+        def on_fit_mode_change(choice):
+            for label, value in fit_mode_options:
+                if label == choice:
+                    self.fit_mode.set(value)
+                    break
+        
+        fit_mode_combo.configure(command=on_fit_mode_change)
+        
+        # Устанавливаем начальное отображаемое значение
+        current_value = self.fit_mode.get()
+        for label, value in fit_mode_options:
+            if value == current_value:
+                fit_mode_combo.set(label)
+                break
+        
+        set_combobox_cursor(fit_mode_combo)
+        ToolTip(
+            fit_mode_combo,
+            "Режим размещения изображения на листе PDF:\n"
+            "• Центрировать = по центру с сохранением пропорций\n"
+            "• Заполнить лист = растянуть на весь лист (может исказить)\n"
+            "• Вписать в лист = максимально вписать с сохранением пропорций"
+        )
+        
+        # ═══ НУМЕРАЦИЯ / ШТАМП ═══
+        numbering_subframe = tk.LabelFrame(
+            ocr_frame,
+            text=" Нумерация (опционально) ",
+            font=FONTS["body"],
+            padx=8,
+            pady=6,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        )
+        numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+        
+        # Строка 1
+        line1_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line1_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(
+            line1_frame,
+            text="Строка 1:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=15,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        line1_entry = ctk.CTkEntry(
+            line1_frame,
+            textvariable=self.numbering_line1,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28
+        )
+        line1_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        enable_field_shortcuts(line1_entry)
+        add_context_menu(line1_entry)
+        ToolTip(line1_entry, "Первая строка (например: ООО 'Компания')")
+        
+        # Строка 2 (с автоинкрементом)
+        line2_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line2_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(
+            line2_frame,
+            text="Строка 2:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=15,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        line2_entry = ctk.CTkEntry(
+            line2_frame,
+            textvariable=self.numbering_line2,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28
+        )
+        line2_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        enable_field_shortcuts(line2_entry)
+        add_context_menu(line2_entry)
+        ToolTip(line2_entry, "Вторая строка с автоинкрементом (123, АБВ/1319, № 1819-А)")
+        
+        # Строка 3
+        line3_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line3_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(
+            line3_frame,
+            text="Строка 3:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=15,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        line3_entry = ctk.CTkEntry(
+            line3_frame,
+            textvariable=self.numbering_line3,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28
+        )
+        line3_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        enable_field_shortcuts(line3_entry)
+        add_context_menu(line3_entry)
+        ToolTip(line3_entry, "Третья строка (например: от 25.12.2024)")
+        
+        # Расположение штампа
+        position_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        position_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(
+            position_frame,
+            text="Расположение:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=15,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        position_options = [
+            ("Правый нижний", "правый-нижний"),
+            ("Центр снизу", "центр-нижний"),
+            ("Левый нижний", "левый-нижний"),
+            ("Левый верхний", "левый-верхний"),
+            ("Центр сверху", "центр-верхний"),
+            ("Правый верхний", "правый-верхний")
+        ]
+        
+        position_combo = ctk.CTkComboBox(
+            position_frame,
+            values=[opt[0] for opt in position_options],
+            state="readonly",
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_hover"],
+            dropdown_fg_color=COLORS["bg_primary"],
+            width=150,
+            height=28
+        )
+        position_combo.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Устанавливаем соответствие между label и value
+        def on_position_change(choice):
+            for label, value in position_options:
+                if label == choice:
+                    self.numbering_position.set(value)
+                    break
+        
+        position_combo.configure(command=on_position_change)
+        
+        # Устанавливаем начальное отображаемое значение
+        current_value = self.numbering_position.get()
+        for label, value in position_options:
+            if value == current_value:
+                position_combo.set(label)
+                break
+        
+        set_combobox_cursor(position_combo)
+        ToolTip(position_combo, "Выберите расположение штампа на странице")
+        
+        # Чекбокс "Поставить штамп" (рамка)
+        border_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        border_frame.pack(fill=tk.X, pady=2)
+        
+        border_check = tk.Checkbutton(
+            border_frame,
+            text="Поставить штамп (обводить рамкой)",
+            variable=self.numbering_border,
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_primary"]
+        )
+        border_check.pack(side=tk.LEFT)
+        ToolTip(border_check, "Обводить текст белым прямоугольником с черной рамкой")
+        
+        # Режим инкремента
+        increment_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        increment_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(
+            increment_frame,
+            text="Инкремент строки 2:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            width=15,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+        
+        increment_doc = tk.Radiobutton(
+            increment_frame,
+            text="На каждом документе",
+            variable=self.numbering_increment_mode,
+            value="per_document",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_primary"]
+        )
+        increment_doc.pack(side=tk.LEFT, padx=(5, 10))
+        ToolTip(increment_doc, "Увеличивать номер на каждом новом документе")
+        
+        increment_doc_first = tk.Radiobutton(
+            increment_frame,
+            text="На первом листе документа",
+            variable=self.numbering_increment_mode,
+            value="per_document_first_page",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_primary"]
+        )
+        increment_doc_first.pack(side=tk.LEFT, padx=(0, 10))
+        ToolTip(increment_doc_first, "Увеличивать номер документа, но штамповать только первый лист")
+        
+        increment_page = tk.Radiobutton(
+            increment_frame,
+            text="На каждом листе",
+            variable=self.numbering_increment_mode,
+            value="per_page",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_primary"]
+        )
+        increment_page.pack(side=tk.LEFT)
+        ToolTip(increment_page, "Увеличивать номер на каждом новом листе")
+        
+        # Кнопки управления пресетами
+        preset_buttons_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        preset_buttons_frame.pack(fill=tk.X, pady=(8, 5))
+        
+        save_preset_btn = create_icon_button(
+            preset_buttons_frame,
+            icon="💾",
+            command=self.save_stamp_preset,
+            tooltip="Сохранить пресет настроек штампа",
+            style="success",
+            width=32,
+            height=28
+        )
+        save_preset_btn.pack(side=tk.LEFT, padx=2)
+        
+        load_preset_btn = create_icon_button(
+            preset_buttons_frame,
+            icon="📂",
+            command=self.load_stamp_preset,
+            tooltip="Загрузить пресет",
+            style="primary",
+            width=32,
+            height=28
+        )
+        load_preset_btn.pack(side=tk.LEFT, padx=2)
+        
+        tk.Label(
+            numbering_subframe,
+            text="💡 Строка 2 автоматически увеличивается (1→2, АБВ/1319→АБВ/1320, № 1819-А→№ 1820-А)",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"],
+            wraplength=600,
+            justify="left"
+        ).pack(pady=(5, 0))
         
         # Список файлов
         files_frame = tk.LabelFrame(
@@ -3183,14 +3596,81 @@ class MergeTabTask:
         thread.daemon = True
         thread.start()
     
+    def show_message_safe(self, msg_type, title, message):
+        """Безопасный вызов messagebox из фонового потока через главный поток UI"""
+        def show_in_main_thread():
+            try:
+                if msg_type == "info":
+                    messagebox.showinfo(title, message, parent=self.window.window)
+                elif msg_type == "warning":
+                    messagebox.showwarning(title, message, parent=self.window.window)
+                elif msg_type == "error":
+                    messagebox.showerror(title, message, parent=self.window.window)
+            except:
+                pass  # Если окно уже закрыто
+        
+        # Планируем выполнение в главном потоке UI
+        try:
+            self.window.window.after(0, show_in_main_thread)
+        except:
+            pass  # Если окно уже закрыто
+    
     def process_in_thread(self, doc_type, output_path, use_ocr=True):
         """Обработка документов в отдельном потоке"""
         try:
+            # Получаем параметры качества и нумерации из UI
+            try:
+                ocr_resolution = float(self.ocr_resolution.get())
+                ocr_resolution = max(1.0, min(3.0, ocr_resolution))  # Ограничиваем 1.0-3.0
+            except:
+                ocr_resolution = 1.5  # По умолчанию
+            
+            try:
+                max_img_size_str = self.max_image_size.get().strip()
+                if max_img_size_str in ["", "0", "None"]:
+                    max_img_size = None  # Без ограничений
+                else:
+                    max_img_size = int(max_img_size_str)
+            except:
+                max_img_size = 4000  # По умолчанию
+            
+            fit_mode = self.fit_mode.get() if self.fit_mode.get() in ['центр', 'заполнить', 'вписать'] else 'центр'
+            
+            # Параметры нумерации (только если заполнены)
+            numbering_line1 = self.numbering_line1.get().strip() or None
+            numbering_line2 = self.numbering_line2.get().strip() or None
+            numbering_line3 = self.numbering_line3.get().strip() or None
+            numbering_position = self.numbering_position.get()
+            numbering_border = self.numbering_border.get()
+            numbering_increment_mode = self.numbering_increment_mode.get()
+
+            
             self.log("═" * 60)
             self.log("Начало обработки...")
             self.log(f"Режим: {self.get_mode_name(doc_type)}")
             self.log(f"Файлов в очереди: {len(self.file_list)}")
             self.log(f"Применение OCR: {'Да' if use_ocr else 'Нет (быстрый режим)'}")
+            if doc_type in ['image', 'image_merge', 'pdf']:
+                self.log(f"Разрешение OCR: {ocr_resolution}x")
+                self.log(f"Макс. размер изображения: {max_img_size if max_img_size else 'без ограничений'}")
+            if doc_type in ['image', 'image_merge']:
+                self.log(f"Размещение на листе: {fit_mode}")
+            
+            # Логирование нумерации для всех режимов кроме объединения Word
+            if doc_type != 'word':
+                if numbering_line1 or numbering_line2 or numbering_line3:
+                    self.log("Нумерация:")
+                    if numbering_line1:
+                        self.log(f"  Строка 1: {numbering_line1}")
+                    if numbering_line2:
+                        self.log(f"  Строка 2: {numbering_line2} (с автоинкрементом)")
+                    if numbering_line3:
+                        self.log(f"  Строка 3: {numbering_line3}")
+                    self.log(f"  Позиция: {numbering_position}")
+                    self.log(f"  Рамка: {'Да' if numbering_border else 'Нет'}")
+                    self.log(f"  Инкремент: {numbering_increment_mode}")
+                else:
+                    self.log("Нумерация: не задана (все строки пустые)")
             self.log("═" * 60)
             
             # Проверка остановки перед началом
@@ -3201,7 +3681,9 @@ class MergeTabTask:
             if doc_type == "convert":
                 self.log(f"Папка для сохранения: {output_path}")
                 converted_files = GenerationDocApp.convert_word_to_pdf(
-                    self.file_list, output_path, self.log
+                    self.file_list, output_path, self.log,
+                    numbering_line1, numbering_line2, numbering_line3,
+                    numbering_position, numbering_border, numbering_increment_mode
                 )
                 
                 self.log("═" * 60)
@@ -3210,17 +3692,26 @@ class MergeTabTask:
                     self.log(f"  ✓ {os.path.basename(f)}")
                 self.log("═" * 60)
                 
-                messagebox.showinfo(
+                self.show_message_safe(
+                    "info",
                     "Успех", 
                     f"Успешно конвертировано файлов: {len(converted_files)}\n\n"
-                    f"Файлы сохранены в:\n{output_path}",
-                    parent=self.window.window
+                    f"Файлы сохранены в:\n{output_path}"
                 )
             
             elif doc_type == "image":
                 self.log(f"Папка для сохранения: {output_path}")
                 converted_files = GenerationDocApp.convert_images_to_pdf(
-                    self.file_list, output_path, self.log, use_ocr=use_ocr
+                    self.file_list, output_path, self.log, 
+                    use_ocr=use_ocr,
+                    max_image_size=max_img_size,
+                    fit_mode=fit_mode,
+                    numbering_line1=numbering_line1,
+                    numbering_line2=numbering_line2,
+                    numbering_line3=numbering_line3,
+                    numbering_position=numbering_position,
+                    numbering_border=numbering_border,
+                    numbering_increment_mode=numbering_increment_mode
                 )
                 
                 self.log("═" * 60)
@@ -3229,47 +3720,58 @@ class MergeTabTask:
                     self.log(f"  ✓ {os.path.basename(f)}")
                 self.log("═" * 60)
                 
-                messagebox.showinfo(
+                self.show_message_safe(
+                    "info",
                     "Успех", 
                     f"Успешно конвертировано файлов: {len(converted_files)}\n\n"
-                    f"Файлы сохранены в:\n{output_path}",
-                    parent=self.window.window
+                    f"Файлы сохранены в:\n{output_path}"
                 )
             
             elif doc_type == "convert_merge":
                 self.log(f"Файл для сохранения: {output_path}")
                 GenerationDocApp.convert_and_merge_word_to_pdf(
-                    self.file_list, output_path, self.log
+                    self.file_list, output_path, self.log,
+                    numbering_line1, numbering_line2, numbering_line3,
+                    numbering_position, numbering_border, numbering_increment_mode
                 )
                 
                 self.log("═" * 60)
                 self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
                 self.log("═" * 60)
                 
-                messagebox.showinfo(
+                self.show_message_safe(
+                    "info",
                     "Успех", 
                     f"Word документы успешно конвертированы и объединены!\n\n"
                     f"Обработано файлов: {len(self.file_list)}\n\n"
-                    f"Файл сохранен:\n{output_path}",
-                    parent=self.window.window
+                    f"Файл сохранен:\n{output_path}"
                 )
             
             elif doc_type == "image_merge":
                 self.log(f"Файл для сохранения: {output_path}")
                 GenerationDocApp.convert_and_merge_images_to_pdf(
-                    self.file_list, output_path, self.log, use_ocr=use_ocr
+                    self.file_list, output_path, self.log, 
+                    use_ocr=use_ocr,
+                    max_image_size=max_img_size,
+                    fit_mode=fit_mode,
+                    numbering_line1=numbering_line1,
+                    numbering_line2=numbering_line2,
+                    numbering_line3=numbering_line3,
+                    numbering_position=numbering_position,
+                    numbering_border=numbering_border,
+                    numbering_increment_mode=numbering_increment_mode
                 )
                 
                 self.log("═" * 60)
                 self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
                 self.log("═" * 60)
                 
-                messagebox.showinfo(
+                self.show_message_safe(
+                    "info",
                     "Успех", 
                     f"Изображения успешно конвертированы и объединены!\n\n"
                     f"Обработано файлов: {len(self.file_list)}\n\n"
-                    f"Файл сохранен:\n{output_path}",
-                    parent=self.window.window
+                    f"Файл сохранен:\n{output_path}"
                 )
             
             else:
@@ -3279,25 +3781,30 @@ class MergeTabTask:
                     GenerationDocApp.merge_word_documents(self.file_list, output_path, self.log)
                 else:
                     self.log("Объединение PDF документов...")
-                    GenerationDocApp.merge_pdf_documents(self.file_list, output_path, self.log, use_ocr=use_ocr)
+                    GenerationDocApp.merge_pdf_documents(
+                        self.file_list, output_path, self.log, use_ocr=use_ocr,
+                        numbering_line1=numbering_line1, numbering_line2=numbering_line2, numbering_line3=numbering_line3,
+                        numbering_position=numbering_position, numbering_border=numbering_border,
+                        numbering_increment_mode=numbering_increment_mode
+                    )
                 
                 self.log("═" * 60)
                 self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
                 self.log("═" * 60)
                 
-                messagebox.showinfo(
+                self.show_message_safe(
+                    "info",
                     "Успех", 
-                    f"Документы успешно объединены!\n\nФайл сохранен:\n{output_path}",
-                    parent=self.window.window
+                    f"Документы успешно объединены!\n\nФайл сохранен:\n{output_path}"
                 )
         
         except Warning as w:
             self.log(f"⚠️ Частичный успех: {str(w)}")
-            messagebox.showwarning("Частичный успех", str(w), parent=self.window.window)
+            self.show_message_safe("warning", "Частичный успех", str(w))
         except Exception as e:
             if not self.should_stop:
                 self.log(f"❌ ОШИБКА: {str(e)}")
-                messagebox.showerror("Ошибка", f"Ошибка при обработке документов:\n{str(e)}", parent=self.window.window)
+                self.show_message_safe("error", "Ошибка", f"Ошибка при обработке документов:\n{str(e)}")
         finally:
             if self.should_stop:
                 self.log("\n⏹ Обработка остановлена пользователем")
@@ -3308,6 +3815,108 @@ class MergeTabTask:
                     self.merge_btn.configure(text="▶ Объединить (конвертировать)")
             except:
                 pass
+    
+    def save_stamp_preset(self):
+        """Сохранить текущие настройки штампа как пресет"""
+        # Проверяем, есть ли что сохранять
+        line1 = self.numbering_line1.get().strip()
+        line2 = self.numbering_line2.get().strip()
+        line3 = self.numbering_line3.get().strip()
+        
+        if not line1 and not line2 and not line3:
+            messagebox.showwarning(
+                "Пустой пресет",
+                "Заполните хотя бы одну строку штампа перед сохранением пресета.",
+                parent=self.window.window
+            )
+            return
+        
+        # Запрашиваем имя пресета через SimpleInputDialog
+        dialog = SimpleInputDialog(
+            self.window.window,
+            "Сохранить пресет штампа",
+            "Введите название пресета:"
+        )
+        self.window.window.wait_window(dialog.top)
+        preset_name = dialog.result
+        
+        if not preset_name:
+            return
+        
+        # Создаем папку для пресетов штампов если её нет
+        presets_dir = os.path.join(os.path.dirname(__file__), "presets", "stamps")
+        os.makedirs(presets_dir, exist_ok=True)
+        
+        # Формируем данные пресета
+        preset_data = {
+            "line1": line1,
+            "line2": line2,
+            "line3": line3,
+            "position": self.numbering_position.get(),
+            "border": self.numbering_border.get(),
+            "increment_mode": self.numbering_increment_mode.get()
+        }
+        
+        # Сохраняем в JSON
+        preset_file = os.path.join(presets_dir, f"{preset_name}.json")
+        try:
+            with open(preset_file, 'w', encoding='utf-8') as f:
+                json.dump(preset_data, f, ensure_ascii=False, indent=2)
+            
+            messagebox.showinfo(
+                "Успех",
+                f"Пресет '{preset_name}' успешно сохранен!",
+                parent=self.window.window
+            )
+            self.log(f"✓ Пресет штампа '{preset_name}' сохранен")
+        except Exception as e:
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось сохранить пресет:\n{str(e)}",
+                parent=self.window.window
+            )
+    
+    def load_stamp_preset(self):
+        """Загрузить сохраненный пресет штампа"""
+        presets_dir = os.path.join(os.path.dirname(__file__), "presets", "stamps")
+        os.makedirs(presets_dir, exist_ok=True)
+        
+        # Используем PresetSelectionDialog для выбора пресета
+        dialog = PresetSelectionDialog(self.window.window, presets_dir)
+        self.window.window.wait_window(dialog.top)
+        
+        preset_path = dialog.result
+        if not preset_path:
+            return
+        
+        # Загружаем выбранный пресет
+        try:
+            with open(preset_path, 'r', encoding='utf-8') as f:
+                preset_data = json.load(f)
+            
+            # Применяем настройки
+            self.numbering_line1.set(preset_data.get("line1", ""))
+            self.numbering_line2.set(preset_data.get("line2", ""))
+            self.numbering_line3.set(preset_data.get("line3", ""))
+            self.numbering_position.set(preset_data.get("position", "правый-нижний"))
+            self.numbering_border.set(preset_data.get("border", True))
+            self.numbering_increment_mode.set(preset_data.get("increment_mode", "per_document"))
+            
+            preset_name = os.path.basename(preset_path).replace('.json', '')
+            messagebox.showinfo(
+                "Успех",
+                f"Пресет '{preset_name}' успешно загружен!",
+                parent=self.window.window
+            )
+            self.log(f"✓ Пресет штампа '{preset_name}' загружен")
+        except Exception as e:
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось загрузить пресет:\n{str(e)}",
+                parent=self.window.window
+            )
+    
+
     
     def get_mode_name(self, doc_type):
         """Получить название режима"""
@@ -3443,6 +4052,72 @@ def _replace_placeholders_in_paragraph(paragraph, replacements):
                 text = re.sub(pattern, str(replacement), text)
             run.text = text
 
+def _convert_single_image(args):
+    """
+    Конвертация одного изображения в PDF (функция для параллельного выполнения).
+    
+    Args:
+        args: кортеж (image_file, output_folder, use_ocr, max_image_size, fit_mode, 
+                     numbering_line1, numbering_line2, numbering_line3, numbering_position, numbering_border)
+    
+    Returns:
+        dict: {
+            'success': bool,
+            'pdf_file': str or None,
+            'image_file': str,
+            'error': str or None
+        }
+    """
+    image_file, output_folder, use_ocr, max_image_size, fit_mode, numbering_line1, numbering_line2, numbering_line3, numbering_position, numbering_border = args
+    
+    try:
+        if not os.path.exists(image_file):
+            raise FileNotFoundError(f"Файл не найден: {image_file}")
+        
+        image_file = os.path.abspath(image_file)
+        
+        base_name = os.path.splitext(os.path.basename(image_file))[0]
+        
+        if output_folder:
+            os.makedirs(output_folder, exist_ok=True)
+            pdf_file = os.path.join(output_folder, base_name + ".pdf")
+        else:
+            pdf_file = os.path.join(os.path.dirname(image_file), base_name + ".pdf")
+        
+        # Конвертация
+        if use_ocr:
+            GenerationDocApp.image_to_pdf_with_ocr(image_file, pdf_file, None, max_image_size, fit_mode,
+                                                   numbering_line1, numbering_line2, numbering_line3,
+                                                   numbering_position, numbering_border)  # log_callback=None для параллельных задач
+        else:
+            GenerationDocApp.image_to_pdf_simple(image_file, pdf_file, None, max_image_size, fit_mode,
+                                                 numbering_line1, numbering_line2, numbering_line3,
+                                                 numbering_position, numbering_border)
+        
+        if os.path.exists(pdf_file):
+            return {
+                'success': True,
+                'pdf_file': pdf_file,
+                'image_file': image_file,
+                'error': None
+            }
+        else:
+            return {
+                'success': False,
+                'pdf_file': None,
+                'image_file': image_file,
+                'error': 'PDF файл не был создан'
+            }
+    
+    except Exception as e:
+        return {
+            'success': False,
+            'pdf_file': None,
+            'image_file': image_file,
+            'error': str(e)
+        }
+
+
 def _convert_single_pdf(args):
     """
     Конвертация одного DOCX файла в PDF (функция для параллельного выполнения).
@@ -3484,6 +4159,8 @@ def _convert_single_pdf(args):
         
         success = False
         last_error = None
+        word = None
+        doc = None
         
         if WIN32COM_AVAILABLE:
             try:
@@ -3492,15 +4169,46 @@ def _convert_single_pdf(args):
                 
                 pythoncom.CoInitialize()
                 try:
+                    # Используем DispatchEx для нового экземпляра Word
                     word = win32com.client.DispatchEx("Word.Application")
                     word.Visible = False
-                    doc = word.Documents.Open(docx_file)
+                    word.DisplayAlerts = 0  # Выключаем все диалоги
+                    
+                    # Открываем документ с таймаутом
+                    doc = word.Documents.Open(docx_file, ReadOnly=True, AddToRecentFiles=False)
+                    
+                    # Сохраняем в PDF
                     doc.SaveAs(pdf_file, FileFormat=17)  # 17 = wdFormatPDF
-                    doc.Close()
-                    word.Quit()
+                    
                     success = True
+                    
+                except Exception as e:
+                    last_error = f"win32com: {str(e)}"
+                    
                 finally:
-                    pythoncom.CoUninitialize()
+                    # Гарантированное закрытие документа и Word
+                    try:
+                        if doc:
+                            doc.Close(SaveChanges=False)
+                    except:
+                        pass
+                    
+                    try:
+                        if word:
+                            word.Quit()
+                            word = None
+                    except:
+                        pass
+                    
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+                    
+                    # Очищаем ссылки
+                    doc = None
+                    word = None
+                    gc.collect()
                     
             except Exception as e:
                 last_error = f"win32com: {str(e)}"
@@ -7570,14 +8278,13 @@ class GenerationDocApp:
         
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
-        from copy import deepcopy
         
         merged_doc = Document(file_paths[0])
         
         # Конвертируем нумерацию в тексте и в первом документе
         GenerationDocApp.convert_numbering_to_text(merged_doc)
         
-        for file_path in file_paths[1:]:
+        for idx, file_path in enumerate(file_paths[1:], 1):
             paragraphs = merged_doc.paragraphs
             if paragraphs:
                 last_para = paragraphs[-1]
@@ -7593,15 +8300,25 @@ class GenerationDocApp:
             # Это решает проблему продолжения нумерации между документами
             GenerationDocApp.convert_numbering_to_text(doc)
             
-            # Копируем XML элементы
+            # ОПТИМИЗАЦИЯ: Используем напрямую элементы без deepcopy
+            # deepcopy очень медленный для больших XML структур
             for element in doc.element.body:
                 if element.tag.endswith('sectPr'):
                     continue
                 
-                element_copy = deepcopy(element)
-                merged_doc.element.body.append(element_copy)
+                # Перемещаем элемент напрямую вместо копирования
+                merged_doc.element.body.append(element)
+            
+            # Очистка памяти после обработки каждого документа
+            del doc
+            if idx % 5 == 0:  # Каждые 5 документов
+                gc.collect()
         
         merged_doc.save(output_path)
+        
+        # Финальная очистка
+        del merged_doc
+        gc.collect()
         
         if log_callback:
             log_callback("✓ Word документы успешно объединены")
@@ -7678,7 +8395,7 @@ class GenerationDocApp:
             return False
     
     @staticmethod
-    def ocr_pdf(pdf_path, output_path=None, log_callback=None):
+    def ocr_pdf(pdf_path, output_path=None, log_callback=None, ocr_resolution=1.5, enable_memory_optimization=True):
         """Выполняет OCR для PDF файла, создавая PDF с текстовым слоем
         
         Использует Windows OCR (встроен в Windows 10+) - никаких внешних моделей!
@@ -7687,6 +8404,9 @@ class GenerationDocApp:
             pdf_path: путь к исходному PDF
             output_path: путь для сохранения PDF с текстом (если None, перезаписывает исходный)
             log_callback: функция для логирования
+            ocr_resolution: разрешение рендеринга для OCR (1.0-3.0). 
+                           1.5 - оптимально, 2.0 - высокое качество, 3.0 - максимум
+            enable_memory_optimization: включить оптимизацию памяти (очистка каждые 3 страницы)
             
         Returns:
             str: путь к PDF с текстовым слоем
@@ -7779,120 +8499,154 @@ class GenerationDocApp:
         c = rl_canvas.Canvas(temp_pdf_path, pagesize=A4)
         page_width, page_height = A4
         
-        for page_idx in range(page_count):
-            if log_callback:
-                log_callback(f"  OCR: страница {page_idx + 1}/{page_count}...")
-            
-            page = doc[page_idx]
-            
-            # Рендерим страницу в изображение с высоким разрешением
-            mat = fitz.Matrix(2.0, 2.0)  # 2x масштаб для качества
-            pix = page.get_pixmap(matrix=mat)
-            
-            # Конвертируем в PIL Image
-            img_data = pix.tobytes("png")
-            img = Image.open(io.BytesIO(img_data))
-            
-            img_width, img_height = img.size
-            
-            # Сохраняем во временный файл для reportlab
-            temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            temp_img_path = temp_img.name
-            temp_img.close()
-            img.save(temp_img_path, 'PNG')
-            
-            # Коэффициент масштабирования
-            scale_x = page_width / img_width
-            scale_y = page_height / img_height
-            
-            # Рисуем изображение на странице
-            c.drawImage(temp_img_path, 0, 0, width=page_width, height=page_height)
-            
-            try:
-                # Конвертируем PIL Image в формат для Windows OCR
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                # Создаём поток для изображения
-                img_bytes = io.BytesIO()
-                img.save(img_bytes, format='BMP')
-                img_data_bytes = img_bytes.getvalue()
-                
-                # Асинхронная функция для OCR
-                async def perform_ocr_async():
-                    stream = InMemoryRandomAccessStream()
-                    writer = DataWriter(stream)
-                    writer.write_bytes(img_data_bytes)
-                    await writer.store_async()
-                    stream.seek(0)
-                    
-                    decoder = await BitmapDecoder.create_async(stream)
-                    software_bitmap = await decoder.get_software_bitmap_async(
-                        BitmapPixelFormat.BGRA8,
-                        BitmapAlphaMode.PREMULTIPLIED
-                    )
-                    
-                    result = await ocr_engine.recognize_async(software_bitmap)
-                    return result
-                
-                # Выполняем OCR
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    ocr_result = loop.run_until_complete(perform_ocr_async())
-                    loop.close()
-                except RuntimeError:
-                    # Если уже есть running loop
-                    ocr_result = asyncio.run(perform_ocr_async())
-                
-                # Обрабатываем результаты распознавания
-                if ocr_result:
-                    # Сохраняем состояние и устанавливаем режим невидимого текста
-                    # PDF оператор "3 Tr" = invisible text (только для поиска/копирования)
-                    c.saveState()
-                    c._code.append('3 Tr')  # Text render mode 3 = invisible
-                    c.setFillColorRGB(0, 0, 0)
-                    
-                    for line in ocr_result.lines:
-                        text = line.text
-                        if text.strip():
-                            words = line.words
-                            if words:
-                                # Находим границы всех слов в строке
-                                min_x = min(w.bounding_rect.x for w in words)
-                                min_y = min(w.bounding_rect.y for w in words)
-                                max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in words)
-                                max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
-                                
-                                # Масштабируем координаты
-                                x = min_x * scale_x
-                                y = page_height - max_y * scale_y
-                                height = (max_y - min_y) * scale_y
-                                
-                                # Размер шрифта по высоте
-                                font_size = max(height * 0.8, 8)
-                                
-                                c.setFont(font_name, font_size)
-                                c.drawString(x, y, text)
-                    
-                    # Восстанавливаем состояние
-                    c.restoreState()
-                
-            except Exception as e:
+        # Список временных файлов для гарантированного удаления
+        temp_files_cleanup = []
+        
+        try:
+            for page_idx in range(page_count):
                 if log_callback:
-                    log_callback(f"  OCR: предупреждение на странице {page_idx + 1}: {str(e)}")
-            
-            finally:
-                # Удаляем временный файл изображения
+                    log_callback(f"  OCR: страница {page_idx + 1}/{page_count}...")
+                
+                page = doc[page_idx]
+                pix = None
+                img = None
+                temp_img_path = None
+                
                 try:
-                    os.unlink(temp_img_path)
+                    # Разрешение для OCR (настраиваемое)
+                    mat = fitz.Matrix(ocr_resolution, ocr_resolution)
+                    pix = page.get_pixmap(matrix=mat)
+                    
+                    # Конвертируем в PIL Image
+                    img_data = pix.tobytes("png")
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    img_width, img_height = img.size
+                    
+                    # Сохраняем во временный файл для reportlab
+                    temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    temp_img_path = temp_img.name
+                    temp_img.close()
+                    temp_files_cleanup.append(temp_img_path)
+                    
+                    img.save(temp_img_path, 'PNG')
+                    
+                    # Коэффициент масштабирования
+                    scale_x = page_width / img_width
+                    scale_y = page_height / img_height
+                    
+                    # Рисуем изображение на странице
+                    c.drawImage(temp_img_path, 0, 0, width=page_width, height=page_height)
+                    
+                    try:
+                        # Конвертируем PIL Image в формат для Windows OCR
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        # Создаём поток для изображения
+                        img_bytes = io.BytesIO()
+                        img.save(img_bytes, format='BMP')
+                        img_data_bytes = img_bytes.getvalue()
+                        img_bytes.close()
+                        
+                        # Асинхронная функция для OCR
+                        async def perform_ocr_async():
+                            stream = InMemoryRandomAccessStream()
+                            writer = DataWriter(stream)
+                            writer.write_bytes(img_data_bytes)
+                            await writer.store_async()
+                            stream.seek(0)
+                            
+                            decoder = await BitmapDecoder.create_async(stream)
+                            software_bitmap = await decoder.get_software_bitmap_async(
+                                BitmapPixelFormat.BGRA8,
+                                BitmapAlphaMode.PREMULTIPLIED
+                            )
+                            
+                            result = await ocr_engine.recognize_async(software_bitmap)
+                            return result
+                        
+                        # Выполняем OCR
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            ocr_result = loop.run_until_complete(perform_ocr_async())
+                            loop.close()
+                        except RuntimeError:
+                            # Если уже есть running loop
+                            ocr_result = asyncio.run(perform_ocr_async())
+                        
+                        # Обрабатываем результаты распознавания
+                        if ocr_result:
+                            # Сохраняем состояние и устанавливаем режим невидимого текста
+                            # PDF оператор "3 Tr" = invisible text (только для поиска/копирования)
+                            c.saveState()
+                            c._code.append('3 Tr')  # Text render mode 3 = invisible
+                            c.setFillColorRGB(0, 0, 0)
+                            
+                            for line in ocr_result.lines:
+                                text = line.text
+                                if text.strip():
+                                    words = line.words
+                                    if words:
+                                        # Находим границы всех слов в строке
+                                        min_x = min(w.bounding_rect.x for w in words)
+                                        min_y = min(w.bounding_rect.y for w in words)
+                                        max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in words)
+                                        max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
+                                        
+                                        # Масштабируем координаты
+                                        x = min_x * scale_x
+                                        y = page_height - max_y * scale_y
+                                        height = (max_y - min_y) * scale_y
+                                        
+                                        # Размер шрифта по высоте
+                                        font_size = max(height * 0.8, 8)
+                                        
+                                        c.setFont(font_name, font_size)
+                                        c.drawString(x, y, text)
+                            
+                            # Восстанавливаем состояние
+                            c.restoreState()
+                    
+                    except Exception as e:
+                        if log_callback:
+                            log_callback(f"  OCR: предупреждение на странице {page_idx + 1}: {str(e)}")
+                    
+                    c.showPage()
+                
+                finally:
+                    # ОПТИМИЗАЦИЯ: Гарантированная очистка ресурсов после каждой страницы
+                    if img:
+                        try:
+                            img.close()
+                        except:
+                            pass
+                    if pix:
+                        try:
+                            pix = None  # PyMuPDF автоматически освобождает
+                        except:
+                            pass
+                    
+                    # Очистка памяти каждые 3 страницы (опционально)
+                    if enable_memory_optimization and (page_idx + 1) % 3 == 0:
+                        gc.collect()
+        
+        finally:
+            # Гарантированное закрытие документа и сохранение
+            doc.close()
+            c.save()
+            
+            # Удаляем все временные файлы
+            for temp_file in temp_files_cleanup:
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
                 except:
                     pass
             
-            c.showPage()
-        
-        doc.close()
-        c.save()
+            # Финальная очистка памяти
+            gc.collect()
         
         # Заменяем исходный файл
         import shutil
@@ -7904,7 +8658,10 @@ class GenerationDocApp:
         return output_path
     
     @staticmethod
-    def merge_pdf_documents(file_paths, output_path, log_callback=None, use_ocr=True):
+    def merge_pdf_documents(file_paths, output_path, log_callback=None, use_ocr=True,
+                            numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                            numbering_position='правый-нижний', numbering_border=True,
+                            numbering_increment_mode='per_page'):
         """Объединение PDF документов с опциональным OCR для сканов
         
         Args:
@@ -7912,6 +8669,12 @@ class GenerationDocApp:
             output_path: путь к выходному файлу
             log_callback: функция для логирования
             use_ocr: применять ли OCR к PDF файлам без текстового слоя
+            numbering_line1: первая строка штампа
+            numbering_line2: вторая строка штампа (с автоинкрементом)
+            numbering_line3: третья строка штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_page' или 'per_document')
         
         Автоматически применяет OCR к PDF файлам без текстового слоя
         для обеспечения возможности копирования текста.
@@ -7956,6 +8719,10 @@ class GenerationDocApp:
         processed_files = []
         temp_files_to_cleanup = []
         
+        # НУМЕРАЦИЯ: Если режим per_document или per_document_first_page, добавляем штампы ДО объединения
+        current_line2 = numbering_line2
+        add_numbering_before_merge = numbering_increment_mode in ['per_document', 'per_document_first_page'] and any([numbering_line1, numbering_line2, numbering_line3])
+        
         for idx, pdf_file in enumerate(file_paths):
             if log_callback:
                 log_callback(f"  Проверка файла {idx + 1}/{len(file_paths)}: {os.path.basename(pdf_file)}")
@@ -7999,24 +8766,79 @@ class GenerationDocApp:
                             log_callback(f"    ⚠ Ошибка OCR: {str(e)}, используется оригинал")
                         processed_files.append(pdf_file)
         
+        # НУМЕРАЦИЯ per_document/per_document_first_page: Добавляем штампы к каждому файлу ДО объединения
+        files_to_merge = []
+        if add_numbering_before_merge:
+            for idx, pdf_file in enumerate(processed_files):
+                # Создаем временный файл для PDF со штампами
+                temp_numbered = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+                temp_numbered_path = temp_numbered.name
+                temp_numbered.close()
+                temp_files_to_cleanup.append(temp_numbered_path)
+                
+                # Выбираем режим для добавления штампов внутри документа
+                if numbering_increment_mode == 'per_document_first_page':
+                    # Штамп только на первом листе
+                    internal_mode = 'per_document_first_page'
+                else:
+                    # per_document: штамп на всех листах, но не инкрементируем
+                    internal_mode = 'no_increment'
+                
+                # Добавляем штампы
+                GenerationDocApp.add_numbering_to_existing_pdf(
+                    pdf_file, temp_numbered_path,
+                    numbering_line1, current_line2, numbering_line3,
+                    numbering_position, numbering_border,
+                    internal_mode,
+                    log_callback
+                )
+                
+                files_to_merge.append(temp_numbered_path)
+                
+                # Инкрементируем для следующего документа
+                if current_line2:
+                    current_line2 = GenerationDocApp.increment_line2(current_line2)
+        else:
+            files_to_merge = processed_files
+        
         # Объединяем обработанные файлы
         merger = PdfMerger()
         
-        for pdf_file in processed_files:
-            merger.append(pdf_file)
+        try:
+            for pdf_file in files_to_merge:
+                merger.append(pdf_file)
+            
+            merger.write(output_path)
         
-        merger.write(output_path)
-        merger.close()
-        
-        # Удаляем временные файлы
-        for temp_file in temp_files_to_cleanup:
+        finally:
+            # ОПТИМИЗАЦИЯ: Гарантированное закрытие merger
             try:
-                os.unlink(temp_file)
+                merger.close()
             except:
                 pass
+            
+            # Удаляем временные файлы
+            for temp_file in temp_files_to_cleanup:
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                except:
+                    pass
+            
+            # Очистка памяти после объединения
+            gc.collect()
         
         if log_callback:
             log_callback("✓ PDF документы успешно объединены")
+        
+        # НУМЕРАЦИЯ per_page: Добавляем штампы ПОСЛЕ объединения
+        if numbering_increment_mode == 'per_page' and any([numbering_line1, numbering_line2, numbering_line3]):
+            GenerationDocApp.add_numbering_to_existing_pdf(
+                output_path, output_path,
+                numbering_line1, numbering_line2, numbering_line3,
+                numbering_position, numbering_border,
+                numbering_increment_mode, log_callback
+            )
     
     @staticmethod
     def show_ocr_setup_dialog(parent):
@@ -8105,13 +8927,22 @@ class GenerationDocApp:
                     pass
     
     @staticmethod
-    def convert_word_to_pdf(file_paths, output_folder=None, log_callback=None):
+    def convert_word_to_pdf(file_paths, output_folder=None, log_callback=None,
+                            numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                            numbering_position='правый-нижний', numbering_border=True,
+                            numbering_increment_mode='per_document'):
         """Конвертация Word документов в PDF с параллельной обработкой
         
         Args:
             file_paths: список путей к Word файлам
             output_folder: папка для сохранения PDF (если None, сохраняет рядом с исходным файлом)
             log_callback: функция для логирования
+            numbering_line1: первая строка штампа
+            numbering_line2: вторая строка штампа (с автоинкрементом)
+            numbering_line3: третья строка штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
         
         Returns:
             список путей к созданным PDF файлам
@@ -8189,16 +9020,53 @@ class GenerationDocApp:
             else:
                 raise Exception(error_msg)
         
+        # Добавляем нумерацию к каждому PDF (если задана)
+        if any([numbering_line1, numbering_line2, numbering_line3]):
+            if log_callback:
+                log_callback(f"\n[ШТАМП] Добавление нумерации к {len(converted_files)} файлам...")
+            
+            current_line2 = numbering_line2
+            for idx, pdf_file in enumerate(converted_files, 1):
+                if log_callback:
+                    log_callback(f"  [{idx}/{len(converted_files)}] {os.path.basename(pdf_file)}...")
+                
+                # Выбираем режим для добавления штампов внутри документа
+                if numbering_increment_mode == 'per_document_first_page':
+                    internal_mode = 'per_document_first_page'
+                else:
+                    internal_mode = 'per_page'
+                
+                GenerationDocApp.add_numbering_to_existing_pdf(
+                    pdf_file, pdf_file,
+                    numbering_line1, current_line2, numbering_line3,
+                    numbering_position, numbering_border,
+                    internal_mode,
+                    log_callback
+                )
+                
+                # Инкрементируем line2 для следующего документа (если режим per_document или per_document_first_page)
+                if numbering_increment_mode in ['per_document', 'per_document_first_page'] and current_line2:
+                    current_line2 = GenerationDocApp.increment_line2(current_line2)
+        
         return converted_files
     
     @staticmethod
-    def convert_and_merge_word_to_pdf(file_paths, output_file, log_callback=None):
+    def convert_and_merge_word_to_pdf(file_paths, output_file, log_callback=None,
+                                      numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                                      numbering_position='правый-нижний', numbering_border=True,
+                                      numbering_increment_mode='per_document'):
         """Конвертация Word документов в PDF и объединение в один файл
         
         Args:
             file_paths: список путей к Word файлам
             output_file: путь к результирующему PDF файлу
             log_callback: функция для логирования
+            numbering_line1: первая строка штампа
+            numbering_line2: вторая строка штампа (с автоинкрементом)
+            numbering_line3: третья строка штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
         """
         if not file_paths:
             raise ValueError("Список файлов пуст")
@@ -8287,33 +9155,489 @@ class GenerationDocApp:
                 log_callback(f"Объединение {len(temp_pdf_files)} PDF файлов...")
             
             merger = PdfMerger()
-            for pdf_file in temp_pdf_files:
-                merger.append(pdf_file)
             
-            merger.write(output_file)
-            merger.close()
+            try:
+                for pdf_file in temp_pdf_files:
+                    merger.append(pdf_file)
+                
+                merger.write(output_file)
+            
+            finally:
+                # ОПТИМИЗАЦИЯ: Гарантированное закрытие merger
+                try:
+                    merger.close()
+                except:
+                    pass
+                
+                # Очистка памяти
+                gc.collect()
             
             if log_callback:
                 log_callback("✓ Объединение завершено")
+            
+            # Добавляем нумерацию (если задана)
+            if any([numbering_line1, numbering_line2, numbering_line3]):
+                GenerationDocApp.add_numbering_to_existing_pdf(
+                    output_file, output_file,
+                    numbering_line1, numbering_line2, numbering_line3,
+                    numbering_position, numbering_border,
+                    numbering_increment_mode, log_callback
+                )
             
             if errors:
                 raise Warning(f"Файл создан, но были ошибки при конвертации некоторых документов:\n" + "\n".join(errors))
             
         finally:
+            # ОПТИМИЗАЦИЯ: Гарантированное удаление временной папки
             import shutil
             try:
                 shutil.rmtree(temp_dir)
             except:
                 pass
+            
+            # Финальная очистка памяти
+            gc.collect()
     
     @staticmethod
-    def image_to_pdf_simple(image_path, output_pdf_path, log_callback=None):
+    def increment_line2(line2_text):
+        """Увеличивает числовое значение в строке 2
+        
+        Args:
+            line2_text: строка с номером (например: "1", "АБВ/1319", "№ 1819-А")
+            
+        Returns:
+            Строка с увеличенным номером
+        """
+        import re
+        
+        if not line2_text or not line2_text.strip():
+            return line2_text
+        
+        # Ищем все числа в строке
+        numbers = list(re.finditer(r'\d+', line2_text))
+        
+        if not numbers:
+            return line2_text  # Если нет чисел, возвращаем как есть
+        
+        # Берем последнее число в строке
+        last_number_match = numbers[-1]
+        old_number = last_number_match.group()
+        new_number = str(int(old_number) + 1)
+        
+        # Сохраняем ведущие нули
+        if old_number.startswith('0') and len(old_number) > 1:
+            new_number = new_number.zfill(len(old_number))
+        
+        # Заменяем последнее число
+        result = line2_text[:last_number_match.start()] + new_number + line2_text[last_number_match.end():]
+        return result
+    
+    @staticmethod
+    def add_numbering_to_existing_pdf(input_pdf_path, output_pdf_path=None, 
+                                      numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                                      numbering_position='правый-нижний', numbering_border=True,
+                                      numbering_increment_mode='per_page', log_callback=None):
+        """Добавляет штампы нумерации к существующему PDF файлу
+        
+        Args:
+            input_pdf_path: путь к исходному PDF файлу
+            output_pdf_path: путь к выходному файлу (если None, перезаписывает input_pdf_path)
+            numbering_line1: первая строка штампа
+            numbering_line2: вторая строка штампа (с автоинкрементом)
+            numbering_line3: третья строка штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_page' или 'per_document')
+            log_callback: функция для логирования
+        """
+        if not any([numbering_line1, numbering_line2, numbering_line3]):
+            if log_callback:
+                log_callback("[ШТАМП] Нумерация не задана, пропускаем")
+            return input_pdf_path  # Если нумерация не задана, ничего не делаем
+        
+        if not REPORTLAB_AVAILABLE or not PIL_AVAILABLE:
+            if log_callback:
+                log_callback("[ШТАМП] ⚠ reportlab или Pillow не установлены, штампы не добавлены")
+            return input_pdf_path
+        
+        try:
+            from reportlab.pdfgen import canvas as rl_canvas
+            from reportlab.lib.pagesizes import A4
+            import tempfile
+            
+            if log_callback:
+                log_callback(f"[ШТАМП] Добавление нумерации к PDF...")
+                log_callback(f"  Строка 1: {numbering_line1}")
+                log_callback(f"  Строка 2: {numbering_line2}")
+                log_callback(f"  Строка 3: {numbering_line3}")
+                log_callback(f"  Позиция: {numbering_position}")
+                log_callback(f"  Рамка: {numbering_border}")
+                log_callback(f"  Режим инкремента: {numbering_increment_mode}")
+            
+            # Импортируем PdfReader и PdfWriter
+            from pypdf import PdfReader, PdfWriter
+            
+            reader = PdfReader(input_pdf_path)
+            num_pages = len(reader.pages)
+            
+            if log_callback:
+                log_callback(f"[ШТАМП] Обработка {num_pages} страниц...")
+            
+            # Создаем временный файл для overlay
+            temp_overlay = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+            temp_overlay_path = temp_overlay.name
+            temp_overlay.close()
+            
+            # Создаем overlay PDF со штампами
+            c = rl_canvas.Canvas(temp_overlay_path, pagesize=A4)
+            page_width, page_height = A4
+            
+            current_line2 = numbering_line2
+            
+            for page_num in range(num_pages):
+                # При режиме per_document_first_page штампуем только первую страницу
+                if numbering_increment_mode == 'per_document_first_page' and page_num > 0:
+                    # Пропускаем все страницы кроме первой, но все равно создаем пустую страницу в overlay
+                    c.showPage()
+                    continue
+                
+                # Добавляем штамп на страницу
+                GenerationDocApp.add_numbering_stamp(
+                    c, page_width, page_height,
+                    numbering_line1, current_line2, numbering_line3,
+                    numbering_position, numbering_border
+                )
+                
+                if log_callback and page_num < 5:  # Логируем только первые 5 страниц
+                    log_callback(f"  Страница {page_num + 1}: line2='{current_line2}'")
+                
+                # Инкрементируем для следующей страницы (в зависимости от режима)
+                if numbering_increment_mode == 'no_increment':
+                    # Не инкрементируем (для per_document внутри одного документа)
+                    pass
+                elif current_line2 and numbering_increment_mode in ['per_page', 'per_document']:
+                    # Инкрементируем на каждой странице
+                    current_line2 = GenerationDocApp.increment_line2(current_line2)
+                
+                c.showPage()
+            
+            c.save()
+            
+            # Объединяем overlay с оригиналом
+            if output_pdf_path is None:
+                output_pdf_path = input_pdf_path
+            
+            overlay_reader = PdfReader(temp_overlay_path)
+            writer = PdfWriter()
+            
+            for page_num in range(num_pages):
+                page = reader.pages[page_num]
+                overlay_page = overlay_reader.pages[page_num]
+                page.merge_page(overlay_page)
+                writer.add_page(page)
+            
+            # Создаем временный файл для результата
+            temp_output = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+            temp_output_path = temp_output.name
+            temp_output.close()
+            
+            with open(temp_output_path, 'wb') as f:
+                writer.write(f)
+            
+            # Заменяем оригинальный файл
+            import shutil
+            shutil.move(temp_output_path, output_pdf_path)
+            
+            # Удаляем временные файлы
+            try:
+                os.unlink(temp_overlay_path)
+            except:
+                pass
+            
+            if log_callback:
+                log_callback(f"[ШТАМП] ✓ Нумерация успешно добавлена")
+            
+            return output_pdf_path
+            
+        except Exception as e:
+            if log_callback:
+                log_callback(f"[ШТАМП] ✗ Ошибка добавления штампов: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return input_pdf_path
+    
+    @staticmethod
+    def add_numbering_stamp(canvas_obj, page_width, page_height, line1=None, line2=None, line3=None, 
+                          position='правый-нижний', draw_border=True):
+        """Добавляет штамп нумерации на страницу PDF
+        
+        Args:
+            canvas_obj: объект Canvas из reportlab
+            page_width: ширина страницы
+            page_height: высота страницы
+            line1: первая строка текста
+            line2: вторая строка текста (с автоинкрементом)
+            line3: третья строка текста
+            position: позиция штампа (правый-нижний, центр-нижний, левый-нижний, левый-верхний, центр-верхний, правый-верхний)
+            draw_border: рисовать рамку вокруг текста (True/False)
+        """
+        if not any([line1, line2, line3]):
+            return  # Если все параметры пустые, ничего не рисуем
+        
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        
+        # Регистрируем шрифт Times New Roman
+        font_name = "Times-Roman"  # Стандартный шрифт Times
+        try:
+            # Пробуем загрузить системный Times New Roman для поддержки кириллицы
+            times_paths = [
+                "C:/Windows/Fonts/times.ttf",
+                "C:/Windows/Fonts/Times.ttf",
+                "C:/Windows/Fonts/timesnewroman.ttf",
+            ]
+            for font_path in times_paths:
+                if os.path.exists(font_path):
+                    pdfmetrics.registerFont(TTFont('TimesNewRoman', font_path))
+                    font_name = 'TimesNewRoman'
+                    break
+        except:
+            pass  # Используем стандартный Times-Roman
+        
+        # Параметры штампа
+        font_size = 8
+        line_height = 10  # Высота строки
+        padding = 8  # Отступы внутри прямоугольника
+        
+        # Собираем строки для отображения
+        lines = []
+        if line1:
+            lines.append(str(line1))
+        if line2:
+            lines.append(str(line2))
+        if line3:
+            lines.append(str(line3))
+        
+        if not lines:
+            return
+        
+        # Вычисляем размеры прямоугольника
+        max_text_width = 0
+        canvas_obj.setFont(font_name, font_size)
+        for line in lines:
+            text_width = canvas_obj.stringWidth(line, font_name, font_size)
+            max_text_width = max(max_text_width, text_width)
+        
+        rect_width = max_text_width + 2 * padding
+        rect_height = len(lines) * line_height + 2 * padding
+        
+        # Определяем позицию в зависимости от параметра position
+        margin = 20
+        
+        # Горизонтальная позиция
+        if 'правый' in position:
+            rect_x = page_width - rect_width - margin
+        elif 'центр' in position:
+            rect_x = (page_width - rect_width) / 2
+        else:  # левый
+            rect_x = margin
+        
+        # Вертикальная позиция
+        if 'нижний' in position:
+            rect_y = margin
+        else:  # верхний
+            rect_y = page_height - rect_height - margin
+        
+        # Рисуем прямоугольник (если нужна рамка)
+        if draw_border:
+            canvas_obj.setStrokeColorRGB(0, 0, 0)  # Черная рамка
+            # Рисуем только рамку без заливки (прозрачный фон)
+            canvas_obj.rect(rect_x, rect_y, rect_width, rect_height, fill=0, stroke=1)
+        
+        # Рисуем текст (центрированный)
+        canvas_obj.setFillColorRGB(0, 0, 0)  # Черный текст
+        canvas_obj.setFont(font_name, font_size)
+        
+        # Начальная позиция текста (сверху вниз)
+        text_y = rect_y + rect_height - padding - font_size
+        
+        for line in lines:
+            text_width = canvas_obj.stringWidth(line, font_name, font_size)
+            # Центрируем текст
+            text_x = rect_x + (rect_width - text_width) / 2
+            canvas_obj.drawString(text_x, text_y, line)
+            text_y -= line_height
+    
+    @staticmethod
+    def _image_to_pdf_with_reportlab(image_path, output_pdf_path, log_callback=None, max_image_size=None, fit_mode='центр',
+                                     numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                                     numbering_position='правый-нижний', numbering_border=True, use_ocr=False):
+        """Внутренняя функция для создания PDF из изображения с использованием reportlab
+        
+        Используется когда нужна нумерация или OCR с reportlab
+        """
+        import tempfile
+        from reportlab.pdfgen import canvas as rl_canvas
+        from reportlab.lib.pagesizes import A4
+        
+        img = None
+        temp_img_path = None
+        
+        try:
+            # Открываем изображение
+            img = Image.open(image_path)
+            
+            # Ограничение размера изображения (опционально)
+            if max_image_size and max(img.size) > max_image_size:
+                ratio = max_image_size / max(img.size)
+                new_size = tuple(int(dim * ratio) for dim in img.size)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                if log_callback:
+                    log_callback(f"    ℹ Изображение уменьшено до {new_size} для экономии памяти")
+            
+            # Конвертируем в RGB если нужно
+            if img.mode in ('RGBA', 'LA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            img_width, img_height = img.size
+            page_width, page_height = A4
+            
+            # Применяем режим размещения на странице
+            if fit_mode == 'заполнить':
+                scaled_width = page_width
+                scaled_height = page_height
+                x_offset = 0
+                y_offset = 0
+                if log_callback:
+                    log_callback(f"    ℹ Режим: растянуто на весь лист")
+            elif fit_mode == 'вписать':
+                scale = min(page_width / img_width, page_height / img_height)
+                scaled_width = img_width * scale
+                scaled_height = img_height * scale
+                x_offset = (page_width - scaled_width) / 2
+                y_offset = (page_height - scaled_height) / 2
+                if log_callback:
+                    log_callback(f"    ℹ Режим: вписано в лист")
+            else:  # 'центр'
+                scale = min(page_width / img_width, page_height / img_height)
+                scaled_width = img_width * scale
+                scaled_height = img_height * scale
+                x_offset = (page_width - scaled_width) / 2
+                y_offset = (page_height - scaled_height) / 2
+            
+            # Сохраняем во временный файл
+            temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            temp_img_path = temp_img.name
+            temp_img.close()
+            img.save(temp_img_path, 'PNG')
+            
+            # Создаём PDF
+            c = rl_canvas.Canvas(output_pdf_path, pagesize=A4)
+            
+            # Рисуем изображение
+            c.drawImage(temp_img_path, x_offset, y_offset, width=scaled_width, height=scaled_height)
+            
+            # Выполняем OCR если нужно и доступен pytesseract
+            if use_ocr and PYTESSERACT_AVAILABLE:
+                try:
+                    if log_callback:
+                        log_callback(f"    OCR: распознавание текста...")
+                    
+                    ocr_data = pytesseract.image_to_data(
+                        Image.open(temp_img_path), 
+                        lang='rus+eng', 
+                        output_type=pytesseract.Output.DICT
+                    )
+                    
+                    # Добавляем распознанный текст как невидимый слой
+                    for i in range(len(ocr_data['text'])):
+                        text = ocr_data['text'][i]
+                        if text.strip():
+                            x = x_offset + ocr_data['left'][i] * scale
+                            y = page_height - y_offset - (ocr_data['top'][i] + ocr_data['height'][i]) * scale
+                            h = ocr_data['height'][i] * scale
+                            font_size = max(h * 0.7, 4)
+                            
+                            c.setFont("Helvetica", font_size)
+                            c.setFillColorRGB(0, 0, 0, alpha=0)
+                            c.drawString(x, y, text)
+                    
+                    if log_callback:
+                        log_callback(f"    ✓ OCR выполнен")
+                        
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"    ⚠ OCR не выполнен: {str(e)}")
+            
+            # Добавляем штамп нумерации (если указан)
+            if log_callback:
+                log_callback(f"[DEBUG] Проверка нумерации: line1={numbering_line1}, line2={numbering_line2}, line3={numbering_line3}")
+            
+            if any([numbering_line1, numbering_line2, numbering_line3]):
+                if log_callback:
+                    log_callback(f"[ШТАМП] Добавление штампа на страницу...")
+                    log_callback(f"  Строка 1: {numbering_line1}")
+                    log_callback(f"  Строка 2: {numbering_line2}")
+                    log_callback(f"  Строка 3: {numbering_line3}")
+                    log_callback(f"  Позиция: {numbering_position}")
+                    log_callback(f"  Рамка: {numbering_border}")
+                
+                GenerationDocApp.add_numbering_stamp(c, page_width, page_height, 
+                                                    numbering_line1, numbering_line2, numbering_line3,
+                                                    numbering_position, numbering_border)
+                if log_callback:
+                    log_callback(f"    ✓ Добавлен штамп нумерации")
+            else:
+                if log_callback:
+                    log_callback(f"[DEBUG] Нумерация не применяется (все строки пустые)")
+            
+            c.showPage()
+            c.save()
+            
+            return output_pdf_path
+        
+        finally:
+            # Гарантированное закрытие ресурсов
+            if img:
+                try:
+                    img.close()
+                except:
+                    pass
+            
+            # Удаляем временный файл
+            if temp_img_path:
+                try:
+                    if os.path.exists(temp_img_path):
+                        os.unlink(temp_img_path)
+                except:
+                    pass
+    
+    @staticmethod
+    def image_to_pdf_simple(image_path, output_pdf_path, log_callback=None, max_image_size=None, fit_mode='центр',
+                           numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                           numbering_position='правый-нижний', numbering_border=True):
         """Простая конвертация изображения в PDF без OCR (быстрый режим)
         
         Args:
             image_path: путь к файлу изображения
             output_pdf_path: путь для сохранения PDF
             log_callback: функция для логирования
+            max_image_size: максимальный размер изображения (None = без ограничений)
+            fit_mode: режим размещения изображения:
+                     'center' - по центру с сохранением пропорций
+                     'fill' - на весь лист (может обрезать)
+                     'fit' - на весь лист с сохранением пропорций
+            numbering_line1: строка 1 для штампа (опционально)
+            numbering_line2: строка 2 для штампа с автоинкрементом (опционально)
+            numbering_line3: строка 3 для штампа (опционально)
+            numbering_position: позиция штампа (bottom_right, bottom_center, bottom_left, top_left, top_center, top_right)
+            numbering_border: рисовать рамку вокруг штампа
             
         Returns:
             str: путь к созданному PDF файлу
@@ -8321,33 +9645,89 @@ class GenerationDocApp:
         if not PIL_AVAILABLE:
             raise ImportError("Требуется библиотека Pillow: pip install Pillow")
         
-        # Открываем изображение
-        img = Image.open(image_path)
+        img = None
+        try:
+            # Открываем изображение
+            img = Image.open(image_path)
+            
+            # Ограничение размера изображения (опционально)
+            if max_image_size and max(img.size) > max_image_size:
+                ratio = max_image_size / max(img.size)
+                new_size = tuple(int(dim * ratio) for dim in img.size)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                if log_callback:
+                    log_callback(f"    ℹ Изображение уменьшено до {new_size} для экономии памяти")
+            
+            # Конвертируем в RGB если нужно
+            if img.mode in ('RGBA', 'LA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Применяем режим размещения
+            if fit_mode == 'заполнить':
+                # На весь лист A4 (может обрезать)
+                from reportlab.lib.pagesizes import A4
+                a4_width, a4_height = A4
+                # Изменяем размер до A4
+                img = img.resize((int(a4_width), int(a4_height)), Image.Resampling.LANCZOS)
+                if log_callback:
+                    log_callback(f"    ℹ Режим: растянуто на весь лист")
+            elif fit_mode == 'вписать':
+                # На весь лист с сохранением пропорций
+                from reportlab.lib.pagesizes import A4
+                a4_width, a4_height = A4
+                img_ratio = img.size[0] / img.size[1]
+                a4_ratio = a4_width / a4_height
+                
+                if img_ratio > a4_ratio:
+                    # Изображение шире -> подгоняем по ширине
+                    new_width = int(a4_width)
+                    new_height = int(a4_width / img_ratio)
+                else:
+                    # Изображение выше -> подгоняем по высоте
+                    new_height = int(a4_height)
+                    new_width = int(a4_height * img_ratio)
+                
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                if log_callback:
+                    log_callback(f"    ℹ Режим: вписано в лист с пропорциями")
+            # else: 'center' - по умолчанию, ничего не меняем
+            
+            # Сохраняем как PDF
+            img.save(output_pdf_path, 'PDF', resolution=100.0)
+            
+            return output_pdf_path
         
-        # Конвертируем в RGB если нужно
-        if img.mode in ('RGBA', 'LA', 'P'):
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        # Сохраняем как PDF
-        img.save(output_pdf_path, 'PDF', resolution=100.0)
-        img.close()
-        
-        return output_pdf_path
+        finally:
+            # ОПТИМИЗАЦИЯ: Гарантированное закрытие изображения
+            if img:
+                try:
+                    img.close()
+                except:
+                    pass
     
     @staticmethod
-    def image_to_pdf_with_ocr(image_path, output_pdf_path, log_callback=None):
+    def image_to_pdf_with_ocr(image_path, output_pdf_path, log_callback=None, max_image_size=None, fit_mode='центр',
+                              numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                              numbering_position='правый-нижний', numbering_border=True):
         """Конвертация изображения в PDF с OCR для создания текстового слоя
         
         Args:
             image_path: путь к файлу изображения
             output_pdf_path: путь для сохранения PDF
             log_callback: функция для логирования
+            max_image_size: максимальный размер изображения (None = без ограничений)
+            fit_mode: режим размещения (центр/заполнить/вписать)
+            numbering_line1: строка 1 для штампа (опционально)
+            numbering_line2: строка 2 для штампа с автоинкрементом (опционально)
+            numbering_line3: строка 3 для штампа (опционально)
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку вокруг штампа
             
         Returns:
             str: путь к созданному PDF файлу
@@ -8359,119 +9739,43 @@ class GenerationDocApp:
         
         if not REPORTLAB_AVAILABLE:
             # Fallback - просто сохраняем изображение как PDF без OCR
-            img = Image.open(image_path)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = background
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-            img.save(output_pdf_path, 'PDF', resolution=100.0)
-            img.close()
-            if log_callback:
-                log_callback(f"    ⚠ PDF создан без OCR (требуется reportlab)")
-            return output_pdf_path
+            return GenerationDocApp.image_to_pdf_simple(image_path, output_pdf_path, log_callback, max_image_size, fit_mode,
+                                                        numbering_line1, numbering_line2, numbering_line3,
+                                                        numbering_position, numbering_border)
         
-        from reportlab.pdfgen import canvas as rl_canvas
-        from reportlab.lib.pagesizes import A4
-        
-        # Открываем изображение
-        img = Image.open(image_path)
-        
-        # Конвертируем в RGB если нужно
-        if img.mode in ('RGBA', 'LA', 'P'):
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        img_width, img_height = img.size
-        page_width, page_height = A4
-        
-        # Масштабируем изображение под размер страницы
-        scale = min(page_width / img_width, page_height / img_height)
-        scaled_width = img_width * scale
-        scaled_height = img_height * scale
-        
-        # Центрируем изображение
-        x_offset = (page_width - scaled_width) / 2
-        y_offset = (page_height - scaled_height) / 2
-        
-        # Сохраняем во временный файл
-        temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        temp_img_path = temp_img.name
-        temp_img.close()
-        img.save(temp_img_path, 'PNG')
-        img.close()
-        
-        # Создаём PDF
-        c = rl_canvas.Canvas(output_pdf_path, pagesize=A4)
-        
-        # Рисуем изображение
-        c.drawImage(temp_img_path, x_offset, y_offset, width=scaled_width, height=scaled_height)
-        
-        # Выполняем OCR если доступен pytesseract
-        if PYTESSERACT_AVAILABLE:
-            try:
-                if log_callback:
-                    log_callback(f"    OCR: распознавание текста...")
-                
-                ocr_data = pytesseract.image_to_data(
-                    Image.open(temp_img_path), 
-                    lang='rus+eng', 
-                    output_type=pytesseract.Output.DICT
-                )
-                
-                # Добавляем распознанный текст как невидимый слой
-                for i in range(len(ocr_data['text'])):
-                    text = ocr_data['text'][i]
-                    if text.strip():
-                        # Координаты в масштабе страницы
-                        x = x_offset + ocr_data['left'][i] * scale
-                        y = page_height - y_offset - (ocr_data['top'][i] + ocr_data['height'][i]) * scale
-                        h = ocr_data['height'][i] * scale
-                        font_size = max(h * 0.7, 4)
-                        
-                        c.setFont("Helvetica", font_size)
-                        c.setFillColorRGB(0, 0, 0, alpha=0)  # Невидимый текст
-                        c.drawString(x, y, text)
-                
-                if log_callback:
-                    log_callback(f"    ✓ OCR выполнен")
-                    
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"    ⚠ OCR не выполнен: {str(e)}")
-        
-        c.showPage()
-        c.save()
-        
-        # Удаляем временный файл
-        try:
-            os.unlink(temp_img_path)
-        except:
-            pass
-        
-        return output_pdf_path
+        return GenerationDocApp._image_to_pdf_with_reportlab(
+            image_path, output_pdf_path, log_callback, max_image_size, fit_mode,
+            numbering_line1, numbering_line2, numbering_line3, 
+            numbering_position, numbering_border, use_ocr=True
+        )
     
     @staticmethod
-    def convert_images_to_pdf(file_paths, output_folder=None, log_callback=None, use_ocr=True):
-        """Конвертация изображений в PDF с опциональным OCR
+    def convert_images_to_pdf(file_paths, output_folder=None, log_callback=None, use_ocr=True, 
+                              max_image_size=4000, fit_mode='центр',
+                              numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                              numbering_position='правый-нижний', numbering_border=True,
+                              numbering_increment_mode='per_document'):
+        """Конвертация изображений в PDF с опциональным OCR и параллельной обработкой
         
         Args:
             file_paths: список путей к файлам изображений
             output_folder: папка для сохранения PDF (если None, сохраняет рядом с исходным файлом)
             log_callback: функция для логирования
             use_ocr: применять ли OCR к изображениям
+            max_image_size: максимальный размер изображения (None = без ограничений, 4000 по умолчанию)
+            fit_mode: режим размещения (центр/заполнить/вписать)
+            numbering_line1: строка 1 для штампа
+            numbering_line2: строка 2 для штампа с автоинкрементом
+            numbering_line3: строка 3 для штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
         
         Returns:
             список путей к созданным PDF файлам
         """
+        _ensure_concurrent_imports()
+        
         if not file_paths:
             raise ValueError("Список файлов пуст")
         
@@ -8483,41 +9787,85 @@ class GenerationDocApp:
         
         converted_files = []
         errors = []
-        
         total = len(file_paths)
-        for idx, image_file in enumerate(file_paths, 1):
-            try:
+        
+        if log_callback:
+            log_callback(f"Начало конвертации {total} изображений...")
+        
+        # ОПТИМИЗАЦИЯ: Для изображений используем меньше потоков (OCR интенсивен)
+        try:
+            max_workers = min(2, multiprocessing.cpu_count())  # Максимум 2 потока для изображений
+        except:
+            max_workers = 1
+        
+        # Создаем задачи с автоинкрементом line2 (если нужно)
+        tasks = []
+        current_line2 = numbering_line2
+        
+        if log_callback and numbering_line2:
+            log_callback(f"[ИНКРЕМЕНТ] Режим: {numbering_increment_mode}, базовое значение line2: '{numbering_line2}'")
+        
+        for idx, image_file in enumerate(file_paths):
+            tasks.append((image_file, output_folder, use_ocr, max_image_size, fit_mode, 
+                         numbering_line1, current_line2, numbering_line3, 
+                         numbering_position, numbering_border))
+            
+            if log_callback and current_line2:
+                log_callback(f"[ЗАДАЧА {idx+1}] {os.path.basename(image_file)} -> line2='{current_line2}'")
+            
+            # Инкрементируем line2 для следующего документа (если режим per_document)
+            if numbering_increment_mode == 'per_document' and current_line2:
+                old_line2 = current_line2
+                current_line2 = GenerationDocApp.increment_line2(current_line2)
                 if log_callback:
-                    log_callback(f"Конвертация [{idx}/{total}]: {os.path.basename(image_file)}...")
-                
-                if not os.path.exists(image_file):
-                    raise FileNotFoundError(f"Файл не найден: {image_file}")
-                
-                image_file = os.path.abspath(image_file)
-                
-                base_name = os.path.splitext(os.path.basename(image_file))[0]
-                
-                if output_folder:
-                    os.makedirs(output_folder, exist_ok=True)
-                    pdf_file = os.path.join(output_folder, base_name + ".pdf")
-                else:
-                    pdf_file = os.path.join(os.path.dirname(image_file), base_name + ".pdf")
-                
-                if use_ocr:
-                    GenerationDocApp.image_to_pdf_with_ocr(image_file, pdf_file, log_callback)
-                else:
-                    GenerationDocApp.image_to_pdf_simple(image_file, pdf_file, log_callback)
-                
-                converted_files.append(pdf_file)
+                    log_callback(f"[ИНКРЕМЕНТ] '{old_line2}' -> '{current_line2}'")
+        
+        # Обработка одного файла последовательно (быстрее для одного изображения)
+        if len(tasks) == 1:
+            result = _convert_single_image(tasks[0])
+            if result['success']:
+                converted_files.append(result['pdf_file'])
                 if log_callback:
                     ocr_status = "с OCR" if use_ocr else "без OCR"
-                    log_callback(f"  ✓ Создан ({ocr_status}): {os.path.basename(pdf_file)}")
-                
-            except Exception as e:
-                error_msg = f"{os.path.basename(image_file)}: {str(e)}"
-                errors.append(error_msg)
+                    log_callback(f"  ✓ Создан ({ocr_status}): {os.path.basename(result['pdf_file'])}")
+            else:
+                errors.append(f"{os.path.basename(result['image_file'])}: {result['error']}")
                 if log_callback:
-                    log_callback(f"  ✗ Ошибка: {error_msg}")
+                    log_callback(f"  ✗ Ошибка: {os.path.basename(result['image_file'])}: {result['error']}")
+        else:
+            # Параллельная обработка для нескольких файлов
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_convert_single_image, task): task for task in tasks}
+                
+                completed = 0
+                for future in as_completed(futures):
+                    completed += 1
+                    try:
+                        result = future.result(timeout=600)  # 10 минут таймаут для OCR
+                        
+                        if result['success']:
+                            converted_files.append(result['pdf_file'])
+                            if log_callback:
+                                ocr_status = "с OCR" if use_ocr else "без OCR"
+                                log_callback(f"[{completed}/{total}] ✓ Создан ({ocr_status}): {os.path.basename(result['pdf_file'])}")
+                        else:
+                            errors.append(f"{os.path.basename(result['image_file'])}: {result['error']}")
+                            if log_callback:
+                                log_callback(f"[{completed}/{total}] ✗ {os.path.basename(result['image_file'])}: {result['error']}")
+                    
+                    except Exception as e:
+                        task = futures[future]
+                        image_file = task[0]
+                        errors.append(f"{os.path.basename(image_file)}: Критическая ошибка - {str(e)}")
+                        if log_callback:
+                            log_callback(f"[{completed}/{total}] ✗ {os.path.basename(image_file)}: {str(e)}")
+                    
+                    # ОПТИМИЗАЦИЯ: Очистка памяти после каждых 3 файлов
+                    if completed % 3 == 0:
+                        gc.collect()
+        
+        # Финальная очистка памяти
+        gc.collect()
         
         if not converted_files:
             error_msg = "Ошибки при конвертации всех файлов:\n" + "\n".join(errors)
@@ -8527,14 +9875,21 @@ class GenerationDocApp:
                 raise Exception("Не удалось сконвертировать файлы")
         
         if errors:
-            error_msg = f"Успешно конвертировано: {len(converted_files)}/{total}\n\nОшибки:\n" + "\n".join(errors)
+            error_msg = f"Успешно конвертировано: {len(converted_files)}/{total}\n\nОшибки:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                error_msg += f"\n... и ещё {len(errors) - 10} ошибок"
+            
             if len(errors) == total:
                 raise Exception(error_msg)
         
         return converted_files
     
     @staticmethod
-    def convert_and_merge_images_to_pdf(file_paths, output_file, log_callback=None, use_ocr=True):
+    def convert_and_merge_images_to_pdf(file_paths, output_file, log_callback=None, use_ocr=True,
+                                        max_image_size=4000, fit_mode='центр',
+                                        numbering_line1=None, numbering_line2=None, numbering_line3=None,
+                                        numbering_position='правый-нижний', numbering_border=True,
+                                        numbering_increment_mode='per_document'):
         """Конвертация изображений в PDF с опциональным OCR и объединение в один файл
         
         Args:
@@ -8542,6 +9897,14 @@ class GenerationDocApp:
             output_file: путь к результирующему PDF файлу
             log_callback: функция для логирования
             use_ocr: применять ли OCR к изображениям
+            max_image_size: максимальный размер изображения (None = без ограничений)
+            fit_mode: режим размещения (центр/заполнить/вписать)
+            numbering_line1: строка 1 для штампа
+            numbering_line2: строка 2 для штампа с автоинкрементом
+            numbering_line3: строка 3 для штампа
+            numbering_position: позиция штампа
+            numbering_border: рисовать рамку
+            numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
         """
         if not file_paths:
             raise ValueError("Список файлов пуст")
@@ -8566,6 +9929,8 @@ class GenerationDocApp:
             if log_callback:
                 ocr_mode = "с OCR" if use_ocr else "без OCR (быстрый режим)"
                 log_callback(f"Конвертация {total} изображений {ocr_mode}...")
+                if numbering_line2:
+                    log_callback(f"[ИНКРЕМЕНТ] Режим: {numbering_increment_mode}, базовое значение line2: '{numbering_line2}'")
             
             for idx, image_file in enumerate(file_paths, 1):
                 try:
@@ -8580,11 +9945,28 @@ class GenerationDocApp:
                     base_name = os.path.splitext(os.path.basename(image_file))[0]
                     temp_pdf = os.path.join(temp_dir, base_name + ".pdf")
                     
+                    # Вычисляем текущий line2 с учетом режима инкремента
+                    current_line2 = numbering_line2
+                    if numbering_increment_mode == 'per_document' and numbering_line2 and idx > 1:
+                        # Инкрементируем line2 для каждого документа
+                        for i in range(idx - 1):
+                            old_line2 = current_line2
+                            current_line2 = GenerationDocApp.increment_line2(current_line2)
+                            if log_callback and i == idx - 2:  # Логируем только последний инкремент
+                                log_callback(f"[ИНКРЕМЕНТ] Документ {idx}: '{numbering_line2}' -> '{current_line2}'")
+                    
+                    if log_callback and current_line2:
+                        log_callback(f"[ЗАДАЧА {idx}] Нумерация line2='{current_line2}'")
+                    
                     # Используем конвертацию с OCR или без
                     if use_ocr:
-                        GenerationDocApp.image_to_pdf_with_ocr(image_file, temp_pdf, log_callback)
+                        GenerationDocApp.image_to_pdf_with_ocr(image_file, temp_pdf, log_callback, max_image_size, fit_mode,
+                                                              numbering_line1, current_line2, numbering_line3,
+                                                              numbering_position, numbering_border)
                     else:
-                        GenerationDocApp.image_to_pdf_simple(image_file, temp_pdf, log_callback)
+                        GenerationDocApp.image_to_pdf_simple(image_file, temp_pdf, log_callback, max_image_size, fit_mode,
+                                                            numbering_line1, current_line2, numbering_line3,
+                                                            numbering_position, numbering_border)
                     
                     if os.path.exists(temp_pdf):
                         temp_pdf_files.append(temp_pdf)
@@ -8606,11 +9988,22 @@ class GenerationDocApp:
                 log_callback(f"Объединение {len(temp_pdf_files)} PDF файлов...")
             
             merger = PdfMerger()
-            for pdf_file in temp_pdf_files:
-                merger.append(pdf_file)
             
-            merger.write(output_file)
-            merger.close()
+            try:
+                for pdf_file in temp_pdf_files:
+                    merger.append(pdf_file)
+                
+                merger.write(output_file)
+            
+            finally:
+                # ОПТИМИЗАЦИЯ: Гарантированное закрытие merger
+                try:
+                    merger.close()
+                except:
+                    pass
+                
+                # Очистка памяти
+                gc.collect()
             
             if log_callback:
                 log_callback("✓ Объединение завершено")
@@ -8619,11 +10012,17 @@ class GenerationDocApp:
                 raise Warning(f"Файл создан, но были ошибки при конвертации некоторых изображений:\n" + "\n".join(errors))
             
         finally:
+            # ОПТИМИЗАЦИЯ: Гарантированное удаление временной папки
             import shutil
             try:
                 shutil.rmtree(temp_dir)
             except:
                 pass
+            
+            # Финальная очистка памяти
+            gc.collect()
+            # Финальная очистка памяти
+            gc.collect()
 
 class MergeDocumentsWindow:
     """Окно объединения документов с системой вкладок"""
@@ -9446,34 +10845,25 @@ class FileBuilderWindow:
         presets_frame = tk.Frame(buttons_frame, bg=COLORS["bg_secondary"])
         presets_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        save_preset_btn = tk.Button(
+        save_preset_btn = create_icon_button(
             presets_frame,
-            text="💾",
+            icon="💾",
             command=self.save_preset,
-            bg=COLORS["primary_dark"],
-            fg="white",
-            font=("Segoe UI", 11),
-            width=2,
-            height=1,
-            relief=tk.FLAT,
-            cursor="hand2",
-            activebackground=COLORS["primary_hover"]
+            tooltip="Сохранить пресет настроек",
+            style="success",
+            width=32,
+            height=28
         )
         save_preset_btn.pack(side=tk.LEFT, padx=(0, 2))
-        ToolTip(save_preset_btn, "Сохранить пресет")
         
-        load_preset_btn = tk.Button(
+        load_preset_btn = create_icon_button(
             presets_frame,
-            text="📜",
+            icon="📂",
             command=self.load_preset,
-            bg=COLORS["primary_dark"],
-            fg="white",
-            font=("Segoe UI", 11),
-            width=2,
-            height=1,
-            relief=tk.FLAT,
-            cursor="hand2",
-            activebackground=COLORS["primary_hover"]
+            tooltip="Загрузить пресет",
+            style="primary",
+            width=32,
+            height=28
         )
         load_preset_btn.pack(side=tk.LEFT)
         ToolTip(load_preset_btn, "Загрузить пресет")
