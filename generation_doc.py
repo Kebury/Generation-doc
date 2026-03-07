@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import time
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -68,18 +69,6 @@ try:
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
-
-try:
-    from pdf2image import convert_from_path
-    PDF2IMAGE_AVAILABLE = True
-except ImportError:
-    PDF2IMAGE_AVAILABLE = False
-
-try:
-    import pytesseract
-    PYTESSERACT_AVAILABLE = True
-except ImportError:
-    PYTESSERACT_AVAILABLE = False
 
 try:
     from reportlab.pdfgen import canvas
@@ -1404,6 +1393,176 @@ class TabStatusTooltip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
+# ══════════════════════════════════════════════════════════════════════
+# СИСТЕМА КЭШИРОВАНИЯ ДОКУМЕНТОВ
+# ══════════════════════════════════════════════════════════════════════
+
+import hashlib
+import pickle
+
+class DocumentCache:
+    """Система кэширования для избежания повторного создания одинаковых документов"""
+    def __init__(self, cache_dir=None):
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+        
+        self.cache_dir = cache_dir
+        self.cache_file = os.path.join(cache_dir, "document_cache.pkl")
+        self.cache_data = {}
+        
+        # Создаем директорию если её нет
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Загружаем кэш
+        self.load_cache()
+    
+    def load_cache(self):
+        """Загрузка кэша из файла"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    self.cache_data = pickle.load(f)
+            except:
+                self.cache_data = {}
+    
+    def save_cache(self):
+        """Сохранение кэша в файл"""
+        try:
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.cache_data, f)
+        except:
+            pass
+    
+    def get_file_hash(self, file_path):
+        """Вычисление хэша файла"""
+        if not os.path.exists(file_path):
+            return None
+        
+        hasher = hashlib.md5()
+        try:
+            with open(file_path, 'rb') as f:
+                # Читаем файл порциями для экономии памяти
+                for chunk in iter(lambda: f.read(8192), b''):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except:
+            return None
+    
+    def get_data_hash(self, data_dict):
+        """Вычисление хэша данных (словаря)"""
+        # Сериализуем словарь в строку и вычисляем хэш
+        data_str = json.dumps(data_dict, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(data_str.encode('utf-8')).hexdigest()
+    
+    def get_document_key(self, template_path, data, output_name):
+        """
+        Создание ключа для документа
+        
+        Args:
+            template_path: путь к шаблону
+            data: данные для заполнения (словарь)
+            output_name: имя выходного файла
+        
+        Returns:
+            str: уникальный ключ документа
+        """
+        template_hash = self.get_file_hash(template_path)
+        data_hash = self.get_data_hash(data)
+        
+        if template_hash is None:
+            return None
+        
+        # Комбинируем хэши
+        combined = f"{template_hash}_{data_hash}_{output_name}"
+        return hashlib.md5(combined.encode('utf-8')).hexdigest()
+    
+    def should_create_document(self, template_path, data, output_path):
+        """
+        Проверка нужно ли создавать документ
+        
+        Returns:
+            bool: True если нужно создать, False если уже существует и актуален
+        """
+        # Если выходной файл не существует - нужно создать
+        if not os.path.exists(output_path):
+            return True
+        
+        output_name = os.path.basename(output_path)
+        doc_key = self.get_document_key(template_path, data, output_name)
+        
+        if doc_key is None:
+            return True
+        
+        # Проверяем есть ли в кэше
+        if doc_key in self.cache_data:
+            cache_entry = self.cache_data[doc_key]
+            cached_output = cache_entry.get('output_path')
+            
+            # Если выходной файл совпадает и существует
+            if cached_output == output_path and os.path.exists(output_path):
+                # Проверяем что файл не был изменен
+                current_hash = self.get_file_hash(output_path)
+                cached_hash = cache_entry.get('output_hash')
+                
+                if current_hash == cached_hash:
+                    return False  # Документ актуален, не нужно создавать
+        
+        return True
+    
+    def register_document(self, template_path, data, output_path):
+        """
+        Регистрация созданного документа в кэше
+        
+        Args:
+            template_path: путь к шаблону
+            data: данные для заполнения
+            output_path: путь к созданному документу
+        """
+        output_name = os.path.basename(output_path)
+        doc_key = self.get_document_key(template_path, data, output_name)
+        
+        if doc_key is None:
+            return
+        
+        output_hash = self.get_file_hash(output_path)
+        
+        self.cache_data[doc_key] = {
+            'template_path': template_path,
+            'output_path': output_path,
+            'output_hash': output_hash,
+            'created_at': time.time()
+        }
+        
+        # Сохраняем кэш
+        self.save_cache()
+    
+    def clear_old_entries(self, max_age_days=30):
+        """Удаление старых записей из кэша"""
+        current_time = time.time()
+        max_age_seconds = max_age_days * 24 * 3600
+        
+        keys_to_remove = []
+        for key, entry in self.cache_data.items():
+            age = current_time - entry.get('created_at', 0)
+            if age > max_age_seconds:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.cache_data[key]
+        
+        if keys_to_remove:
+            self.save_cache()
+        
+        return len(keys_to_remove)
+    
+    def clear_cache(self):
+        """Полная очистка кэша"""
+        self.cache_data = {}
+        self.save_cache()
+
+# Глобальный экземпляр кэша
+document_cache = DocumentCache()
+
 # ── КЛАСС ДЛЯ ФОНОВОЙ ПРЕДЗАГРУЗКИ WORD ДОКУМЕНТОВ ───────────────────
 class WordPreloadManager:
     """Менеджер для фоновой конвертации Word документов в PDF"""
@@ -1625,6 +1784,7 @@ class TabTask:
         
         self.excel_path = tk.StringVar()
         self.word_template_path = tk.StringVar()
+        self.excel_template_path = tk.StringVar()  # Путь к Excel шаблону
         self.output_folder = tk.StringVar(value="документы")
         self.filename_base = tk.StringVar(value="наименование")
         self.filename_pattern = tk.StringVar(value="наименование {i:04d}{suffix}.docx")
@@ -1799,6 +1959,7 @@ class TabTask:
         )
         excel_preview_btn.pack(side=tk.LEFT)
         
+        # Word шаблон
         tk.Label(
             files_content,
             text="Word шаблон:",
@@ -1807,7 +1968,7 @@ class TabTask:
             fg=COLORS["text_primary"]
         ).grid(row=1, column=0, sticky="w", pady=SPACING["sm"], padx=(0, SPACING["md"]))
         
-        word_entry = ctk.CTkEntry(
+        self.word_entry = ctk.CTkEntry(
             files_content,
             textvariable=self.word_template_path,
             font=FONTS["body"],
@@ -1816,10 +1977,10 @@ class TabTask:
             border_color=COLORS["border"],
             height=28
         )
-        word_entry.grid(row=1, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
-        enable_field_shortcuts(word_entry, readonly=True)
-        add_context_menu(word_entry, readonly=True)
-        ToolTip(word_entry, "Путь к шаблону Word документа")
+        self.word_entry.grid(row=1, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
+        enable_field_shortcuts(self.word_entry, readonly=True)
+        add_context_menu(self.word_entry, readonly=True)
+        ToolTip(self.word_entry, "Путь к шаблону Word документа")
         
         def on_word_drop(file_path):
             self.last_word_dir = os.path.dirname(file_path)
@@ -1827,17 +1988,17 @@ class TabTask:
             word_preload_manager.preload(file_path)
         
         setup_file_drop(
-            word_entry,
+            self.word_entry,
             self.word_template_path,
             file_types=['.docx'],
             on_drop_callback=on_word_drop
         )
         
-        word_btn_frame = tk.Frame(files_content, bg=COLORS["card_bg"])
-        word_btn_frame.grid(row=1, column=2, pady=SPACING["sm"])
+        self.word_btn_frame = tk.Frame(files_content, bg=COLORS["card_bg"])
+        self.word_btn_frame.grid(row=1, column=2, pady=SPACING["sm"])
         
         word_btn = create_modern_button(
-            word_btn_frame,
+            self.word_btn_frame,
             text="Обзор",
             command=self.browse_word_template,
             style="primary",
@@ -1848,7 +2009,7 @@ class TabTask:
         ToolTip(word_btn, "Открыть диалог выбора Word шаблона")
         
         word_preview_btn = create_icon_button(
-            word_btn_frame,
+            self.word_btn_frame,
             icon="👁",
             command=self.preview_word_template,
             tooltip="Предпросмотр Word шаблона",
@@ -1857,13 +2018,81 @@ class TabTask:
         )
         word_preview_btn.pack(side=tk.LEFT)
         
+        # Excel шаблон
+        tk.Label(
+            files_content,
+            text="Excel шаблон:",
+            font=FONTS["body"],
+            bg=COLORS["card_bg"],
+            fg=COLORS["text_primary"]
+        ).grid(row=2, column=0, sticky="w", pady=SPACING["sm"], padx=(0, SPACING["md"]))
+        
+        self.excel_template_entry = ctk.CTkEntry(
+            files_content,
+            textvariable=self.excel_template_path,
+            font=FONTS["body"],
+            state="readonly",
+            fg_color=COLORS["bg_tertiary"],
+            border_color=COLORS["border"],
+            height=28
+        )
+        self.excel_template_entry.grid(row=2, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
+        enable_field_shortcuts(self.excel_template_entry, readonly=True)
+        add_context_menu(self.excel_template_entry, readonly=True)
+        ToolTip(self.excel_template_entry, "Путь к шаблону Excel документа")
+        
+        def on_excel_template_drop(file_path):
+            self.last_word_dir = os.path.dirname(file_path)
+            self.log(f"Excel шаблон выбран: {file_path}")
+        
+        setup_file_drop(
+            self.excel_template_entry,
+            self.excel_template_path,
+            file_types=['.xlsx', '.xls'],
+            on_drop_callback=on_excel_template_drop
+        )
+        
+        self.excel_template_btn_frame = tk.Frame(files_content, bg=COLORS["card_bg"])
+        self.excel_template_btn_frame.grid(row=2, column=2, pady=SPACING["sm"])
+        
+        excel_template_btn = create_modern_button(
+            self.excel_template_btn_frame,
+            text="Обзор",
+            command=self.browse_excel_template,
+            style="primary",
+            width=70,
+            height=28
+        )
+        excel_template_btn.pack(side=tk.LEFT, padx=(0, SPACING["xs"]))
+        ToolTip(excel_template_btn, "Открыть диалог выбора Excel шаблона")
+        
+        excel_template_preview_btn = create_icon_button(
+            self.excel_template_btn_frame,
+            icon="👁",
+            command=self.preview_excel_template,
+            tooltip="Предпросмотр Excel шаблона",
+            width=28,
+            height=28
+        )
+        excel_template_preview_btn.pack(side=tk.LEFT)
+        
+        # Подсказка о выборе шаблонов
+        hint_label = tk.Label(
+            files_content,
+            text="💡 Можно выбрать один или оба шаблона одновременно",
+            font=("Segoe UI", 8, "italic"),
+            bg=COLORS["card_bg"],
+            fg=COLORS["text_secondary"]
+        )
+        hint_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, SPACING["sm"]))
+        
         tk.Label(
             files_content,
             text="Папка сохранения:",
             font=FONTS["body"],
             bg=COLORS["card_bg"],
             fg=COLORS["text_primary"]
-        ).grid(row=2, column=0, sticky="w", pady=SPACING["sm"], padx=(0, SPACING["md"]))
+        ).grid(row=4, column=0, sticky="w", pady=SPACING["sm"], padx=(0, SPACING["md"]))
         
         output_entry = ctk.CTkEntry(
             files_content,
@@ -1873,7 +2102,7 @@ class TabTask:
             border_color=COLORS["border"],
             height=28
         )
-        output_entry.grid(row=2, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
+        output_entry.grid(row=4, column=1, sticky="ew", pady=SPACING["sm"], padx=(0, SPACING["sm"]))
         enable_field_shortcuts(output_entry)
         add_context_menu(output_entry)
         ToolTip(output_entry, "Путь к папке для сохранения результатов")
@@ -1896,7 +2125,7 @@ class TabTask:
             width=70,
             height=28
         )
-        output_btn.grid(row=2, column=2, pady=SPACING["sm"])
+        output_btn.grid(row=4, column=2, pady=SPACING["sm"])
         ToolTip(output_btn, "Выбрать папку для сохранения")
         
         # ══════════════════════════════════════════════════════════════
@@ -2230,6 +2459,30 @@ class TabTask:
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось открыть файл:\n{str(e)}")
     
+    def browse_excel_template(self):
+        """Выбор Excel шаблона"""
+        filename = filedialog.askopenfilename(
+            title="Выберите Excel шаблон",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("Все файлы", "*.*")],
+            initialdir=self.last_word_dir
+        )
+        if filename:
+            self.excel_template_path.set(filename)
+            self.last_word_dir = os.path.dirname(filename)
+            self.log(f"Excel шаблон выбран: {filename}")
+    
+    def preview_excel_template(self):
+        """Предварительный просмотр Excel шаблона"""
+        excel_file = self.excel_template_path.get()
+        if not excel_file or not os.path.exists(excel_file):
+            messagebox.showwarning("Предупреждение", "Сначала выберите Excel шаблон!")
+            return
+        
+        try:
+            PreviewWindow(self.parent_frame, excel_file, f"Просмотр: {os.path.basename(excel_file)}", data_manager=self.app)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть файл:\n{str(e)}")
+    
     def browse_output_folder(self):
         """Выбор папки для сохранения"""
         folder = filedialog.askdirectory(
@@ -2276,8 +2529,12 @@ class TabTask:
             messagebox.showerror("Ошибка", "Выберите Excel файл!")
             return
         
-        if not self.word_template_path.get():
-            messagebox.showerror("Ошибка", "Выберите Word шаблон!")
+        # Проверяем наличие хотя бы одного шаблона
+        has_word = bool(self.word_template_path.get())
+        has_excel = bool(self.excel_template_path.get())
+        
+        if not has_word and not has_excel:
+            messagebox.showerror("Ошибка", "Выберите хотя бы один шаблон (Word или Excel)!")
             return
         
         if not self.output_folder.get():
@@ -2332,12 +2589,18 @@ class MergeTabTask:
         self.fit_mode = tk.StringVar(value="центр")  # Режим размещения
         
         # Параметры нумерации/штампа
+        self.use_numbering = tk.BooleanVar(value=False)  # Включить нумерацию (по умолчанию выключена)
         self.numbering_line1 = tk.StringVar(value="")  # Строка 1
         self.numbering_line2 = tk.StringVar(value="")  # Строка 2 (с автоинкрементом)
         self.numbering_line3 = tk.StringVar(value="")  # Строка 3
         self.numbering_position = tk.StringVar(value="правый-нижний")  # Позиция штампа
         self.numbering_border = tk.BooleanVar(value=True)  # Обводить в рамку
         self.numbering_increment_mode = tk.StringVar(value="per_document")  # Режим нумерации: per_document или per_page
+        
+        # Переменные для прогресса и ETA
+        self.start_time = None
+        self.total_items = 0
+        self.processed_items = 0
         
         self.create_widgets()
     
@@ -2391,10 +2654,10 @@ class MergeTabTask:
         
         main_frame = self.scrollable_frame
         
-        # Выбор типа документов
+        # Выбор функции
         type_frame = tk.LabelFrame(
             main_frame, 
-            text=" Тип документов ", 
+            text=" Функция ", 
             font=FONTS["heading"], 
             padx=12, 
             pady=12,
@@ -2405,74 +2668,309 @@ class MergeTabTask:
         )
         type_frame.pack(fill=tk.X, pady=(0, 12))
         
-        word_radio = tk.Radiobutton(
-            type_frame, 
-            text="Объединить Word документы (.docx)", 
-            variable=self.doc_type, 
-            value="word", 
-            font=FONTS["body"], 
-            bg=COLORS["bg_secondary"]
-        )
-        word_radio.pack(anchor="w", pady=3)
-        ToolTip(word_radio, "Объединить несколько Word документов в один")
+        # Варианты функций с отображаемым текстом и внутренним значением
+        function_options = [
+            ("Объединить Word документы", "word"),
+            ("Объединить PDF документы", "pdf"),
+            ("Конвертировать Word → PDF (раздельно)", "convert"),
+            ("Конвертировать Word → единый PDF", "convert_merge"),
+            ("Конвертировать изображения → PDF (раздельно)", "image"),
+            ("Конвертировать изображения → единый PDF", "image_merge"),
+            ("Пронумеровать PDF (раздельно)", "number_separate"),
+            ("Пронумеровать PDF (с объединением)", "number_merge"),
+            ("Разделить PDF файл", "split_pdf"),
+            ("Повернуть страницы PDF", "rotate_pdf"),
+            ("Извлечь страницы из PDF", "extract_pdf"),
+            ("Извлечь данные в Excel", "extract_to_excel"),
+        ]
         
-        pdf_radio = tk.Radiobutton(
-            type_frame, 
-            text="Объединить PDF документы (.pdf)", 
-            variable=self.doc_type, 
-            value="pdf", 
-            font=FONTS["body"], 
-            bg=COLORS["bg_secondary"]
+        function_label = tk.Label(
+            type_frame,
+            text="Выберите функцию:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            anchor="w"
         )
-        pdf_radio.pack(anchor="w", pady=3)
-        ToolTip(pdf_radio, "Объединить несколько PDF файлов в один")
+        function_label.pack(anchor="w", pady=(0, 5))
         
-        convert_radio = tk.Radiobutton(
-            type_frame, 
-            text="Конвертировать Word → PDF (раздельно)", 
-            variable=self.doc_type, 
-            value="convert", 
-            font=FONTS["body"], 
-            bg=COLORS["bg_secondary"]
+        self.function_combo = ctk.CTkComboBox(
+            type_frame,
+            values=[opt[0] for opt in function_options],
+            state="readonly",
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_hover"],
+            dropdown_fg_color=COLORS["bg_primary"],
+            width=400,
+            height=32
         )
-        convert_radio.pack(anchor="w", pady=3)
-        ToolTip(convert_radio, "Конвертировать Word документы в отдельные PDF файлы")
+        self.function_combo.pack(anchor="w", pady=(0, 5))
         
-        convert_merge_radio = tk.Radiobutton(
-            type_frame, 
-            text="Конвертировать Word → единый PDF", 
-            variable=self.doc_type, 
-            value="convert_merge", 
-            font=FONTS["body"], 
-            bg=COLORS["bg_secondary"]
-        )
-        convert_merge_radio.pack(anchor="w", pady=3)
-        ToolTip(convert_merge_radio, "Конвертировать Word документы в PDF и объединить в один файл")
+        # Метод для управления видимостью настроек нумерации
+        def toggle_numbering_visibility():
+            """Показывает/скрывает настройки нумерации на основе чекбокса"""
+            doc_type_value = self.doc_type.get()
+            
+            # Для функций прямой нумерации чекбокс не влияет (настройки всегда видимы)
+            if doc_type_value in ['number_separate', 'number_merge']:
+                return
+            
+            # Для остальных функций управляем видимостью через чекбокс
+            if self.use_numbering.get():
+                self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+            else:
+                self.numbering_subframe.pack_forget()
         
-        image_radio = tk.Radiobutton(
-            type_frame, 
-            text="Конвертировать изображения → PDF (раздельно)", 
-            variable=self.doc_type, 
-            value="image", 
-            font=FONTS["body"], 
-            bg=COLORS["bg_secondary"]
-        )
-        image_radio.pack(anchor="w", pady=3)
-        ToolTip(image_radio, "Конвертировать изображения в отдельные PDF файлы")
+        # Сохраняем метод в self для доступа из других мест
+        self.toggle_numbering_visibility = toggle_numbering_visibility
         
-        image_merge_radio = tk.Radiobutton(
-            type_frame, 
-            text="Конвертировать изображения → единый PDF", 
-            variable=self.doc_type, 
-            value="image_merge", 
+        def toggle_split_mode():
+            """Показывает/скрывает поле диапазонов в зависимости от режима разделения"""
+            if self.split_mode.get() == "ranges":
+                self.split_ranges_frame.pack(fill=tk.X, pady=(0, 10))
+                self.split_help_label.pack(pady=(5, 0))
+            else:
+                self.split_ranges_frame.pack_forget()
+                self.split_help_label.pack_forget()
+        
+        # Сохраняем метод в self для доступа из других мест
+        self.toggle_split_mode = toggle_split_mode
+        
+        # Устанавливаем соответствие между label и value
+        def on_function_change(choice):
+            for label, value in function_options:
+                if label == choice:
+                    self.doc_type.set(value)
+                    
+                    # Сначала скрываем все дополнительные фреймы
+                    self.ocr_frame.pack_forget()
+                    self.numbering_checkbox_frame.pack_forget()
+                    self.numbering_subframe.pack_forget()
+                    self.split_pdf_frame.pack_forget()
+                    self.rotate_pdf_frame.pack_forget()
+                    self.extract_pdf_frame.pack_forget()
+                    self.extract_to_excel_frame.pack_forget()
+                    
+                    # Показываем нужные фреймы в зависимости от функции
+                    if value == 'word':
+                        # Для Word не нужны дополнительные настройки
+                        pass
+                    
+                    elif value == 'split_pdf':
+                        # Разделение PDF - показываем настройки разделения
+                        self.split_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                    
+                    elif value == 'rotate_pdf':
+                        # Поворот страниц - показываем настройки поворота
+                        self.rotate_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                    
+                    elif value == 'extract_pdf':
+                        # Извлечение страниц - показываем настройки извлечения
+                        self.extract_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                    
+                    elif value == 'extract_to_excel':
+                        # Извлечение данных в Excel - показываем настройки
+                        self.extract_to_excel_frame.pack(fill=tk.X, pady=(0, 12))
+                    
+                    elif value in ['number_separate', 'number_merge']:
+                        # Для функций прямой нумерации:
+                        # - показываем ocr_frame
+                        # - скрываем чекбокс (он не нужен)
+                        # - показываем настройки нумерации (всегда)
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+                        # Включаем нумерацию принудительно
+                        self.use_numbering.set(True)
+                    
+                    else:
+                        # Для всех остальных функций (конвертация, объединение):
+                        # - показываем ocr_frame
+                        # - показываем чекбокс нумерации
+                        # - управление видимостью через чекбокс
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(10, 0))
+                        
+                        # Применяем текущее состояние чекбокса
+                        if self.use_numbering.get():
+                            self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+                    break
+        
+        self.function_combo.configure(command=on_function_change)
+        
+        # Устанавливаем начальное отображаемое значение
+        current_value = self.doc_type.get()
+        for label, value in function_options:
+            if value == current_value:
+                self.function_combo.set(label)
+                break
+        
+        set_combobox_cursor(self.function_combo)
+        ToolTip(
+            self.function_combo,
+            "Выберите функцию для работы с документами:\n"
+            "• Объединение - склеивает несколько файлов в один\n"
+            "• Конвертация - переводит формат документов\n"
+            "• Нумерация - добавляет штампы нумерации к PDF"
+        )
+        
+        # Список файлов
+        files_frame = tk.LabelFrame(
+            main_frame, 
+            text=" Файлы ", 
+            font=FONTS["heading"], 
+            padx=12, 
+            pady=12,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        files_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        
+        # Listbox с прокруткой
+        list_container = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
+        list_container.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(list_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.files_listbox = tk.Listbox(
+            list_container, 
+            yscrollcommand=scrollbar.set, 
             font=FONTS["body"], 
+            relief=tk.SOLID, 
+            borderwidth=1
+        )
+        self.files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.files_listbox.yview)
+        
+        btn_files_frame = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
+        btn_files_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        add_btn = create_modern_button(
+            btn_files_frame, 
+            text="+ Добавить", 
+            command=self.add_files, 
+            style="primary",
+            width=12, 
+            tooltip="Добавить файлы в конец списка"
+        )
+        add_btn.pack(side=tk.LEFT, padx=2)
+        
+        insert_btn = create_modern_button(
+            btn_files_frame, 
+            text="⊕ Вставить после", 
+            command=self.insert_files_after, 
+            style="primary",
+            width=14, 
+            tooltip="Добавить файлы после выбранного элемента"
+        )
+        insert_btn.pack(side=tk.LEFT, padx=2)
+        
+        up_btn = create_modern_button(
+            btn_files_frame, 
+            text="⬆ Вверх", 
+            command=self.move_up, 
+            style="secondary",
+            width=10, 
+            tooltip="Переместить выбранный файл вверх"
+        )
+        up_btn.pack(side=tk.LEFT, padx=2)
+        
+        down_btn = create_modern_button(
+            btn_files_frame, 
+            text="⬇ Вниз", 
+            command=self.move_down, 
+            style="secondary",
+            width=10, 
+            tooltip="Переместить выбранный файл вниз"
+        )
+        down_btn.pack(side=tk.LEFT, padx=2)
+        
+        preview_btn = tk.Button(
+            btn_files_frame,
+            text="👁",
+            command=self.preview_selected_file,
+            width=3,
+            font=FONTS["button"],
+            bg=COLORS["success"],
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            activebackground=COLORS["success_hover"]
+        )
+        preview_btn.pack(side=tk.LEFT, padx=2)
+        ToolTip(preview_btn, "Предварительный просмотр выбранного файла")
+        
+        # Счетчик файлов
+        self.file_counter_label = tk.Label(
+            btn_files_frame,
+            text="Файлов: 0",
+            font=FONTS["body"],
+            fg=COLORS["text_secondary"],
             bg=COLORS["bg_secondary"]
         )
-        image_merge_radio.pack(anchor="w", pady=3)
-        ToolTip(image_merge_radio, "Конвертировать изображения в PDF и объединить в один файл")
+        self.file_counter_label.pack(side=tk.RIGHT, padx=5)
+        
+        # Вторая строка кнопок
+        btn_files_frame2 = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
+        btn_files_frame2.pack(fill=tk.X, pady=(5, 10))
+        
+        del_btn = create_modern_button(
+            btn_files_frame2, 
+            text="Удалить", 
+            command=self.remove_file, 
+            style="danger",
+            width=10, 
+            tooltip="Удалить выбранный файл из списка"
+        )
+        del_btn.pack(side=tk.LEFT, padx=2)
+        
+        clear_all_btn = create_modern_button(
+            btn_files_frame2, 
+            text="🗑 Очистить все", 
+            command=self.clear_all_files, 
+            style="danger",
+            width=14, 
+            tooltip="Удалить все файлы из списка"
+        )
+        clear_all_btn.pack(side=tk.LEFT, padx=2)
+        
+        cache_btn = create_modern_button(
+            btn_files_frame2, 
+            text="💾 Очистить кэш", 
+            command=self.clear_document_cache, 
+            style="warning",
+            width=14, 
+            tooltip="Очистить кэш созданных документов"
+        )
+        cache_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Подсказка о Drag and Drop
+        if TKDND_AVAILABLE:
+            hint_text = "💡 Вы можете перетаскивать файлы из системы в нужное место списка"
+            hint_color = COLORS["text_secondary"]
+        else:
+            hint_text = "💡 Установите tkinterdnd2 для добавления файлов перетаскиванием: pip install tkinterdnd2"
+            hint_color = COLORS["warning"]
+        
+        hint_label = tk.Label(
+            files_frame,
+            text=hint_text,
+            font=FONTS["small"],
+            fg=hint_color,
+            bg=COLORS["bg_secondary"]
+        )
+        hint_label.pack(pady=(5, 0))
+        
+        # Настройка Drag and Drop
+        self.setup_drag_and_drop()
         
         # OCR настройки
-        ocr_frame = tk.LabelFrame(
+        self.ocr_frame = tk.LabelFrame(
             main_frame, 
             text=" Настройки обработки PDF ", 
             font=FONTS["heading"], 
@@ -2483,10 +2981,10 @@ class MergeTabTask:
             relief=tk.SOLID,
             borderwidth=1
         )
-        ocr_frame.pack(fill=tk.X, pady=(0, 12))
+        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
         
         ocr_checkbox = tk.Checkbutton(
-            ocr_frame,
+            self.ocr_frame,
             text="Применять текстовый слой (OCR) при объединении/конвертации PDF",
             variable=self.use_ocr,
             font=FONTS["body"],
@@ -2503,7 +3001,7 @@ class MergeTabTask:
         )
         
         # ═══ КАЧЕСТВО И РАЗМЕЩЕНИЕ ═══
-        quality_subframe = tk.Frame(ocr_frame, bg=COLORS["bg_secondary"])
+        quality_subframe = tk.Frame(self.ocr_frame, bg=COLORS["bg_secondary"])
         quality_subframe.pack(fill=tk.X, pady=(8, 0))
         
         # Разрешение OCR
@@ -2646,20 +3144,46 @@ class MergeTabTask:
             "• Вписать в лист = максимально вписать с сохранением пропорций"
         )
         
+        # ═══ ЧЕКБОКС НУМЕРАЦИИ ═══
+        # Создаем фрейм-контейнер для чекбокса нумерации
+        self.numbering_checkbox_frame = tk.Frame(self.ocr_frame, bg=COLORS["bg_secondary"])
+        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        self.numbering_checkbox = tk.Checkbutton(
+            self.numbering_checkbox_frame,
+            text="Добавить нумерацию",
+            variable=self.use_numbering,
+            command=self.toggle_numbering_visibility,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_primary"],
+            activebackground=COLORS["bg_secondary"],
+            activeforeground=COLORS["text_primary"]
+        )
+        self.numbering_checkbox.pack(anchor=tk.W, padx=10, pady=5)
+        ToolTip(
+            self.numbering_checkbox,
+            "При включении появятся настройки для добавления\n"
+            "штампа с нумерацией на каждую страницу документа"
+        )
+        
         # ═══ НУМЕРАЦИЯ / ШТАМП ═══
-        numbering_subframe = tk.LabelFrame(
-            ocr_frame,
-            text=" Нумерация (опционально) ",
+        # Создаем фрейм нумерации, который будет показываться/скрываться
+        self.numbering_subframe = tk.LabelFrame(
+            self.ocr_frame,
+            text=" Нумерация ",
             font=FONTS["body"],
             padx=8,
             pady=6,
             bg=COLORS["bg_secondary"],
             fg=COLORS["text_primary"]
         )
-        numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+        # По умолчанию скрыт - будет показан при выборе соответствующей функции
+        # self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
         
         # Строка 1
-        line1_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line1_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         line1_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(
@@ -2686,7 +3210,7 @@ class MergeTabTask:
         ToolTip(line1_entry, "Первая строка (например: ООО 'Компания')")
         
         # Строка 2 (с автоинкрементом)
-        line2_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line2_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         line2_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(
@@ -2713,7 +3237,7 @@ class MergeTabTask:
         ToolTip(line2_entry, "Вторая строка с автоинкрементом (123, АБВ/1319, № 1819-А)")
         
         # Строка 3
-        line3_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        line3_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         line3_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(
@@ -2740,7 +3264,7 @@ class MergeTabTask:
         ToolTip(line3_entry, "Третья строка (например: от 25.12.2024)")
         
         # Расположение штампа
-        position_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        position_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         position_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(
@@ -2797,7 +3321,7 @@ class MergeTabTask:
         ToolTip(position_combo, "Выберите расположение штампа на странице")
         
         # Чекбокс "Поставить штамп" (рамка)
-        border_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        border_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         border_frame.pack(fill=tk.X, pady=2)
         
         border_check = tk.Checkbutton(
@@ -2813,7 +3337,7 @@ class MergeTabTask:
         ToolTip(border_check, "Обводить текст белым прямоугольником с черной рамкой")
         
         # Режим инкремента
-        increment_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        increment_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         increment_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(
@@ -2866,7 +3390,7 @@ class MergeTabTask:
         ToolTip(increment_page, "Увеличивать номер на каждом новом листе")
         
         # Кнопки управления пресетами
-        preset_buttons_frame = tk.Frame(numbering_subframe, bg=COLORS["bg_secondary"])
+        preset_buttons_frame = tk.Frame(self.numbering_subframe, bg=COLORS["bg_secondary"])
         preset_buttons_frame.pack(fill=tk.X, pady=(8, 5))
         
         save_preset_btn = create_icon_button(
@@ -2892,7 +3416,7 @@ class MergeTabTask:
         load_preset_btn.pack(side=tk.LEFT, padx=2)
         
         tk.Label(
-            numbering_subframe,
+            self.numbering_subframe,
             text="💡 Строка 2 автоматически увеличивается (1→2, АБВ/1319→АБВ/1320, № 1819-А→№ 1820-А)",
             font=FONTS["small"],
             fg=COLORS["text_secondary"],
@@ -2901,144 +3425,297 @@ class MergeTabTask:
             justify="left"
         ).pack(pady=(5, 0))
         
-        # Список файлов
-        files_frame = tk.LabelFrame(
-            main_frame, 
-            text=" Файлы ", 
-            font=FONTS["heading"], 
-            padx=12, 
+        # ═══════════════════════════════════════════════════════════
+        # НАСТРОЙКИ РАЗДЕЛЕНИЯ PDF
+        # ═══════════════════════════════════════════════════════════
+        self.split_pdf_frame = tk.LabelFrame(
+            main_frame,
+            text=" Настройки разделения PDF ",
+            font=FONTS["heading"],
+            padx=12,
             pady=12,
             bg=COLORS["bg_secondary"],
             fg=COLORS["text_primary"],
             relief=tk.SOLID,
             borderwidth=1
         )
-        files_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
         
-        # Listbox с прокруткой
-        list_container = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
-        list_container.pack(fill=tk.BOTH, expand=True)
+        # Режим разделения
+        mode_frame = tk.Frame(self.split_pdf_frame, bg=COLORS["bg_secondary"])
+        mode_frame.pack(fill=tk.X, pady=(0, 10))
         
-        scrollbar = tk.Scrollbar(list_container)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Label(
+            mode_frame,
+            text="Режим разделения:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 15))
         
-        self.files_listbox = tk.Listbox(
-            list_container, 
-            yscrollcommand=scrollbar.set, 
-            font=FONTS["body"], 
-            relief=tk.SOLID, 
+        self.split_mode = tk.StringVar(value="pages")
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="По отдельным страницам",
+            variable=self.split_mode,
+            value="pages",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_secondary"],
+            command=self.toggle_split_mode
+        ).pack(side=tk.LEFT, padx=(0, 15))
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="По диапазонам",
+            variable=self.split_mode,
+            value="ranges",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            selectcolor=COLORS["bg_secondary"],
+            command=self.toggle_split_mode
+        ).pack(side=tk.LEFT)
+        
+        # Поле для ввода диапазонов
+        self.split_ranges_frame = tk.Frame(self.split_pdf_frame, bg=COLORS["bg_secondary"])
+        self.split_ranges_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            self.split_ranges_frame,
+            text="Диапазоны страниц:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.split_ranges = tk.StringVar(value="1-2; 3-5")
+        ranges_entry = CTkEntry(
+            self.split_ranges_frame,
+            textvariable=self.split_ranges,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28
+        )
+        ranges_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        enable_field_shortcuts(ranges_entry)
+        add_context_menu(ranges_entry)
+        
+        self.split_help_label = tk.Label(
+            self.split_pdf_frame,
+            text="💡 Введите диапазоны через точку с запятой или запятую.\nПримеры: 1-2; 3-5; 6; 7-13  или  1-3, 4-6, 7",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"],
+            wraplength=600,
+            justify="left"
+        )
+        self.split_help_label.pack(pady=(5, 0))
+        
+        # Скрыть поле для диапазонов по умолчанию
+        self.split_ranges_frame.pack_forget()
+        self.split_help_label.pack_forget()
+        
+        # ═══════════════════════════════════════════════════════════
+        # НАСТРОЙКИ ПОВОРОТА СТРАНИЦ PDF
+        # ═══════════════════════════════════════════════════════════
+        self.rotate_pdf_frame = tk.LabelFrame(
+            main_frame,
+            text=" Настройки поворота страниц ",
+            font=FONTS["heading"],
+            padx=12,
+            pady=12,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
             borderwidth=1
         )
-        self.files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.files_listbox.yview)
         
-        btn_files_frame = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
-        btn_files_frame.pack(fill=tk.X, pady=(10, 0))
+        angle_frame = tk.Frame(self.rotate_pdf_frame, bg=COLORS["bg_secondary"])
+        angle_frame.pack(fill=tk.X, pady=(0, 10))
         
-        add_btn = create_modern_button(
-            btn_files_frame, 
-            text="+ Добавить", 
-            command=self.add_files, 
-            style="primary",
-            width=12, 
-            tooltip="Добавить файлы в конец списка"
-        )
-        add_btn.pack(side=tk.LEFT, padx=2)
-        
-        insert_btn = create_modern_button(
-            btn_files_frame, 
-            text="⊕ Вставить после", 
-            command=self.insert_files_after, 
-            style="primary",
-            width=14, 
-            tooltip="Добавить файлы после выбранного элемента"
-        )
-        insert_btn.pack(side=tk.LEFT, padx=2)
-        
-        up_btn = create_modern_button(
-            btn_files_frame, 
-            text="⬆ Вверх", 
-            command=self.move_up, 
-            style="secondary",
-            width=10, 
-            tooltip="Переместить выбранный файл вверх"
-        )
-        up_btn.pack(side=tk.LEFT, padx=2)
-        
-        down_btn = create_modern_button(
-            btn_files_frame, 
-            text="⬇ Вниз", 
-            command=self.move_down, 
-            style="secondary",
-            width=10, 
-            tooltip="Переместить выбранный файл вниз"
-        )
-        down_btn.pack(side=tk.LEFT, padx=2)
-        
-        del_btn = create_modern_button(
-            btn_files_frame, 
-            text="Удалить", 
-            command=self.remove_file, 
-            style="danger",
-            width=10, 
-            tooltip="Удалить выбранный файл из списка"
-        )
-        del_btn.pack(side=tk.LEFT, padx=2)
-        
-        clear_all_btn = create_modern_button(
-            btn_files_frame, 
-            text="🗑 Очистить все", 
-            command=self.clear_all_files, 
-            style="danger",
-            width=14, 
-            tooltip="Удалить все файлы из списка"
-        )
-        clear_all_btn.pack(side=tk.LEFT, padx=2)
-        
-        preview_btn = tk.Button(
-            btn_files_frame,
-            text="👁",
-            command=self.preview_selected_file,
-            width=3,
-            font=FONTS["button"],
-            bg=COLORS["success"],
-            fg="white",
-            relief=tk.FLAT,
-            cursor="hand2",
-            activebackground=COLORS["success_hover"]
-        )
-        preview_btn.pack(side=tk.LEFT, padx=2)
-        ToolTip(preview_btn, "Предварительный просмотр выбранного файла")
-        
-        # Счетчик файлов
-        self.file_counter_label = tk.Label(
-            btn_files_frame,
-            text="Файлов: 0",
+        tk.Label(
+            angle_frame,
+            text="Угол поворота:",
             font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.rotate_angle = tk.StringVar(value="90")
+        for angle in ["90", "180", "270"]:
+            tk.Radiobutton(
+                angle_frame,
+                text=f"{angle}°",
+                variable=self.rotate_angle,
+                value=angle,
+                font=FONTS["body"],
+                bg=COLORS["bg_secondary"],
+                fg=COLORS["text_primary"],
+                selectcolor=COLORS["bg_primary"]
+            ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        pages_range_frame = tk.Frame(self.rotate_pdf_frame, bg=COLORS["bg_secondary"])
+        pages_range_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(
+            pages_range_frame,
+            text="Страницы (пусто=все):",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.rotate_pages = tk.StringVar(value="")
+        rotate_entry = CTkEntry(
+            pages_range_frame,
+            textvariable=self.rotate_pages,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28,
+            width=300
+        )
+        rotate_entry.pack(side=tk.LEFT)
+        enable_field_shortcuts(rotate_entry)
+        add_context_menu(rotate_entry)
+        
+        tk.Label(
+            self.rotate_pdf_frame,
+            text="💡 Примеры: 1,3,5 или 1-10 или 1-5,10,15-20",
+            font=FONTS["small"],
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_secondary"]
+        ).pack(pady=(5, 0))
+        
+        # ═══════════════════════════════════════════════════════════
+        # НАСТРОЙКИ ИЗВЛЕЧЕНИЯ СТРАНИЦ PDF
+        # ═══════════════════════════════════════════════════════════
+        self.extract_pdf_frame = tk.LabelFrame(
+            main_frame,
+            text=" Настройки извлечения страниц ",
+            font=FONTS["heading"],
+            padx=12,
+            pady=12,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
+            borderwidth=1
         )
-        self.file_counter_label.pack(side=tk.RIGHT, padx=5)
         
-        # Подсказка о Drag and Drop
-        if TKDND_AVAILABLE:
-            hint_text = "💡 Вы можете перетаскивать файлы из системы в нужное место списка"
-            hint_color = COLORS["text_secondary"]
-        else:
-            hint_text = "💡 Установите tkinterdnd2 для добавления файлов перетаскиванием: pip install tkinterdnd2"
-            hint_color = COLORS["warning"]
+        extract_info_frame = tk.Frame(self.extract_pdf_frame, bg=COLORS["bg_secondary"])
+        extract_info_frame.pack(fill=tk.X, pady=(0, 10))
         
-        hint_label = tk.Label(
-            files_frame,
-            text=hint_text,
+        tk.Label(
+            extract_info_frame,
+            text="Укажите страницы для извлечения:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.extract_pages = tk.StringVar(value="")
+        extract_entry = CTkEntry(
+            extract_info_frame,
+            textvariable=self.extract_pages,
+            font=FONTS["body"],
+            fg_color=COLORS["bg_primary"],
+            border_color=COLORS["border"],
+            height=28,
+            width=400
+        )
+        extract_entry.pack(side=tk.LEFT)
+        enable_field_shortcuts(extract_entry)
+        add_context_menu(extract_entry)
+        
+        tk.Label(
+            self.extract_pdf_frame,
+            text="💡 Примеры: 1-5 (с 1 по 5), 1,3,5 (страницы 1, 3 и 5), 1-5,10,15-20",
             font=FONTS["small"],
-            fg=hint_color,
-            bg=COLORS["bg_secondary"]
-        )
-        hint_label.pack(pady=(5, 0))
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"],
+            wraplength=600,
+            justify="left"
+        ).pack(pady=(5, 0))
         
-        # Настройка Drag and Drop
-        self.setup_drag_and_drop()
+        # ═══════════════════════════════════════════════════════════
+        # НАСТРОЙКИ ИЗВЛЕЧЕНИЯ ДАННЫХ В EXCEL
+        # ═══════════════════════════════════════════════════════════
+        self.extract_to_excel_frame = tk.LabelFrame(
+            main_frame,
+            text=" Настройки извлечения данных ",
+            font=FONTS["heading"],
+            padx=12,
+            pady=12,
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        
+        extract_mode_frame = tk.Frame(self.extract_to_excel_frame, bg=COLORS["bg_secondary"])
+        extract_mode_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            extract_mode_frame,
+            text="Метод извлечения:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.extract_method = tk.StringVar(value="full_text")
+        extraction_methods = [
+            ("Полный текст", "full_text"),
+            ("Только таблицы", "tables_only"),
+            ("По регулярному выражению", "regex")
+        ]
+        
+        for label, value in extraction_methods:
+            tk.Radiobutton(
+                self.extract_to_excel_frame,
+                text=label,
+                variable=self.extract_method,
+                value=value,
+                font=FONTS["body"],
+                bg=COLORS["bg_secondary"],
+                fg=COLORS["text_primary"],
+                selectcolor=COLORS["bg_primary"]
+            ).pack(anchor="w", pady=2)
+        
+        # Поле для регулярного выражения (опционально)
+        regex_frame = tk.Frame(self.extract_to_excel_frame, bg=COLORS["bg_secondary"])
+        regex_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(
+            regex_frame,
+            text="Регулярное выражение (опционально):",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor="w")
+        
+        self.extract_regex = tk.StringVar(value="")
+        regex_entry = tk.Entry(
+            regex_frame,
+            textvariable=self.extract_regex,
+            font=FONTS["body"],
+            width=50
+        )
+        regex_entry.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(
+            self.extract_to_excel_frame,
+            text="💡 Извлекает текст из Word/PDF документов и сохраняет в Excel.\n"
+                 "Каждый документ = строка в Excel. Полезно для анализа множества файлов.",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_secondary"],
+            wraplength=600,
+            justify="left"
+        ).pack(pady=(10, 0))
         
         # Кнопка запуска (перед логами)
         btn_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
@@ -3046,7 +3723,7 @@ class MergeTabTask:
         
         self.merge_btn = tk.Button(
             btn_frame,
-            text="▶ Объединить (конвертировать)",
+            text="▶ Начать",
             command=self.merge_documents,
             font=FONTS["button"],
             bg=COLORS["success"],
@@ -3061,6 +3738,45 @@ class MergeTabTask:
         )
         self.merge_btn.pack(pady=5)
         ToolTip(self.merge_btn, "Запустить процесс объединения или конвертации документов")
+        
+        # Прогресс-бар и ETA
+        progress_container = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        progress_container.pack(fill=tk.X, pady=(0, 12))
+        
+        # Лейбл с инфо о прогрессе
+        self.progress_label = tk.Label(
+            progress_container,
+            text="",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            anchor="w"
+        )
+        self.progress_label.pack(fill=tk.X, pady=(0, 5))
+        
+        # Прогресс-бар
+        self.progress_bar = ttk.Progressbar(
+            progress_container,
+            orient="horizontal",
+            length=100,
+            mode="determinate"
+        )
+        self.progress_bar.pack(fill=tk.X)
+        
+        # ETA лейбл (оставшееся время)
+        self.eta_label = tk.Label(
+            progress_container,
+            text="",
+            font=FONTS["small"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"],
+            anchor="e"
+        )
+        self.eta_label.pack(fill=tk.X, pady=(5, 0))
+        
+        # Скрываем прогресс по умолчанию
+        progress_container.pack_forget()
+        self.progress_container = progress_container
         
         # Лог выполнения
         log_frame = tk.LabelFrame(
@@ -3096,6 +3812,21 @@ class MergeTabTask:
             menu.post(event.x_root, event.y_root)
         
         self.log_text.bind("<Button-3>", show_context_menu)
+        
+        # Применяем начальную логику показа/скрытия фреймов (после создания всех элементов)
+        current_value = self.doc_type.get()
+        if current_value == 'word':
+            # По умолчанию word - скрываем настройки PDF
+            self.ocr_frame.pack_forget()
+        elif current_value in ['number_separate', 'number_merge']:
+            # Для функций нумерации - скрываем чекбокс, показываем настройки, включаем нумерацию
+            self.numbering_checkbox_frame.pack_forget()
+            self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+            self.use_numbering.set(True)
+        else:
+            # Для остальных функций - чекбокс выключен по умолчанию, настройки нумерации скрыты
+            self.numbering_subframe.pack_forget()
+            self.use_numbering.set(False)
     
     def _on_canvas_configure(self, event):
         """Изменение ширины canvas при изменении размера окна"""
@@ -3217,11 +3948,13 @@ class MergeTabTask:
             valid = False
             if doc_type in ['word', 'convert', 'convert_merge']:
                 valid = file_path.lower().endswith('.docx')
-            elif doc_type == 'pdf':
+            elif doc_type in ['pdf', 'number_separate', 'number_merge', 'split_pdf', 'rotate_pdf', 'extract_pdf']:
                 valid = file_path.lower().endswith('.pdf')
             elif doc_type in ['image', 'image_merge']:
                 valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.gif')
                 valid = file_path.lower().endswith(valid_exts)
+            elif doc_type == 'extract_to_excel':
+                valid = file_path.lower().endswith(('.docx', '.pdf'))
             
             if not valid:
                 invalid_count += 1
@@ -3243,10 +3976,14 @@ class MergeTabTask:
         if invalid_count > 0:
             if doc_type in ['word', 'convert', 'convert_merge']:
                 file_type = "Word (.docx)"
-            elif doc_type == 'pdf':
+            elif doc_type in ['pdf', 'number_separate', 'number_merge', 'split_pdf', 'rotate_pdf', 'extract_pdf']:
                 file_type = "PDF (.pdf)"
-            else:
+            elif doc_type in ['image', 'image_merge']:
                 file_type = "изображения (.jpg, .png, .bmp, .tiff, .gif)"
+            elif doc_type == 'extract_to_excel':
+                file_type = "Word (.docx) или PDF (.pdf)"
+            else:
+                file_type = "поддерживаемые"
             
             messagebox.showwarning(
                 "Неподходящие файлы",
@@ -3271,6 +4008,13 @@ class MergeTabTask:
                 ("BMP", "*.bmp"),
                 ("TIFF", "*.tiff *.tif"),
                 ("GIF", "*.gif"),
+                ("Все файлы", "*.*")
+            ]
+        elif doc_type == "extract_to_excel":
+            filetypes = [
+                ("Документы", "*.docx *.pdf"),
+                ("Word файлы", "*.docx"),
+                ("PDF файлы", "*.pdf"),
                 ("Все файлы", "*.*")
             ]
         else:
@@ -3334,6 +4078,13 @@ class MergeTabTask:
                 ("BMP", "*.bmp"),
                 ("TIFF", "*.tiff *.tif"),
                 ("GIF", "*.gif"),
+                ("Все файлы", "*.*")
+            ]
+        elif doc_type == "extract_to_excel":
+            filetypes = [
+                ("Документы", "*.docx *.pdf"),
+                ("Word файлы", "*.docx"),
+                ("PDF файлы", "*.pdf"),
                 ("Все файлы", "*.*")
             ]
         else:
@@ -3404,6 +4155,43 @@ class MergeTabTask:
                 messagebox.showerror(
                     "Ошибка", 
                     f"Не удалось очистить список файлов:\n{str(e)}", 
+                    parent=self.window.window
+                )
+    
+    def clear_document_cache(self):
+        """Очистить кэш созданных документов"""
+        try:
+            cache = DocumentCache()
+            entries_count = len(cache.cache)
+            
+            if entries_count == 0:
+                messagebox.showinfo(
+                    "Информация",
+                    "Кэш уже пуст",
+                    parent=self.window.window
+                )
+                return
+            
+            result = messagebox.askyesno(
+                "Подтверждение",
+                f"Очистить кэш созданных документов?\n\nВсего записей: {entries_count}\n\n"
+                f"После очистки все документы будут создаваться заново при следующей генерации.",
+                parent=self.window.window
+            )
+            
+            if result:
+                cache.clear_all()
+                self.log(f"✓ Кэш очищен ({entries_count} записей)")
+                messagebox.showinfo(
+                    "Успех",
+                    f"Кэш успешно очищен!\n\nУдалено записей: {entries_count}",
+                    parent=self.window.window
+                )
+        except Exception as e:
+            self.log(f"❌ Ошибка при очистке кэша: {str(e)}")
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось очистить кэш:\n{str(e)}", 
                     parent=self.window.window
                 )
     
@@ -3541,9 +4329,13 @@ class MergeTabTask:
         doc_type = self.doc_type.get()
         
         # Проверка количества файлов
-        if doc_type in ["convert", "image"]:
-            pass
-        elif doc_type in ["convert_merge", "image_merge"] and len(self.file_list) < 2:
+        if doc_type in ["convert", "image", "number_separate", "extract_to_excel"]:
+            pass  # Можно обрабатывать любое количество файлов
+        elif doc_type in ["split_pdf", "rotate_pdf", "extract_pdf"]:
+            if len(self.file_list) != 1:
+                messagebox.showwarning("Предупреждение", "Выберите ровно один PDF файл для обработки!", parent=self.window.window)
+                return
+        elif doc_type in ["convert_merge", "image_merge", "number_merge"] and len(self.file_list) < 2:
             messagebox.showwarning("Предупреждение", "Для объединения в единый PDF добавьте минимум 2 файла!", parent=self.window.window)
             return
         elif doc_type in ["word", "pdf"] and len(self.file_list) < 2:
@@ -3555,14 +4347,39 @@ class MergeTabTask:
         self.log_text.config(state=tk.DISABLED)
         
         # Определяем выходной путь
-        if doc_type in ["convert", "image"]:
+        if doc_type in ["convert", "image", "number_separate"]:
             output_folder = filedialog.askdirectory(
                 title="Выберите папку для сохранения PDF файлов"
             )
             if not output_folder:
                 return
             output_path = output_folder
-        elif doc_type in ["convert_merge", "image_merge"]:
+        elif doc_type == "split_pdf":
+            output_folder = filedialog.askdirectory(
+                title="Выберите папку для сохранения разделенных PDF файлов"
+            )
+            if not output_folder:
+                return
+            output_path = output_folder
+        elif doc_type == "extract_to_excel":
+            output_file = filedialog.asksaveasfilename(
+                title="Сохранить данные в Excel",
+                defaultextension=".xlsx",
+                filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")]
+            )
+            if not output_file:
+                return
+            output_path = output_file
+        elif doc_type in ["rotate_pdf", "extract_pdf"]:
+            output_file = filedialog.asksaveasfilename(
+                title="Сохранить обработанный PDF файл",
+                defaultextension=".pdf",
+                filetypes=[("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
+            )
+            if not output_file:
+                return
+            output_path = output_file
+        elif doc_type in ["convert_merge", "image_merge", "number_merge"]:
             output_file = filedialog.asksaveasfilename(
                 title="Сохранить объединенный PDF файл",
                 defaultextension=".pdf",
@@ -3636,13 +4453,24 @@ class MergeTabTask:
             
             fit_mode = self.fit_mode.get() if self.fit_mode.get() in ['центр', 'заполнить', 'вписать'] else 'центр'
             
-            # Параметры нумерации (только если заполнены)
-            numbering_line1 = self.numbering_line1.get().strip() or None
-            numbering_line2 = self.numbering_line2.get().strip() or None
-            numbering_line3 = self.numbering_line3.get().strip() or None
-            numbering_position = self.numbering_position.get()
-            numbering_border = self.numbering_border.get()
-            numbering_increment_mode = self.numbering_increment_mode.get()
+            # Параметры нумерации (только если включена нумерация)
+            # Для функций прямой нумерации (number_separate, number_merge) - всегда используем
+            # Для остальных - только если включен чекбокс use_numbering
+            if doc_type in ['number_separate', 'number_merge'] or self.use_numbering.get():
+                numbering_line1 = self.numbering_line1.get().strip() or None
+                numbering_line2 = self.numbering_line2.get().strip() or None
+                numbering_line3 = self.numbering_line3.get().strip() or None
+                numbering_position = self.numbering_position.get()
+                numbering_border = self.numbering_border.get()
+                numbering_increment_mode = self.numbering_increment_mode.get()
+            else:
+                # Нумерация отключена - все параметры None
+                numbering_line1 = None
+                numbering_line2 = None
+                numbering_line3 = None
+                numbering_position = None
+                numbering_border = False
+                numbering_increment_mode = None
 
             
             self.log("═" * 60)
@@ -3678,12 +4506,19 @@ class MergeTabTask:
                 self.log("\n⚠️ Обработка отменена до начала")
                 return
             
+            # Инициализация прогресса
+            self.start_time = time.time()
+            self.total_items = len(self.file_list)
+            self.processed_items = 0
+            self.update_progress(0, self.total_items, "Подготовка...")
+            
             if doc_type == "convert":
                 self.log(f"Папка для сохранения: {output_path}")
                 converted_files = GenerationDocApp.convert_word_to_pdf(
                     self.file_list, output_path, self.log,
                     numbering_line1, numbering_line2, numbering_line3,
-                    numbering_position, numbering_border, numbering_increment_mode
+                    numbering_position, numbering_border, numbering_increment_mode,
+                    progress_callback=self.update_progress
                 )
                 
                 self.log("═" * 60)
@@ -3711,7 +4546,8 @@ class MergeTabTask:
                     numbering_line3=numbering_line3,
                     numbering_position=numbering_position,
                     numbering_border=numbering_border,
-                    numbering_increment_mode=numbering_increment_mode
+                    numbering_increment_mode=numbering_increment_mode,
+                    progress_callback=self.update_progress
                 )
                 
                 self.log("═" * 60)
@@ -3774,12 +4610,228 @@ class MergeTabTask:
                     f"Файл сохранен:\n{output_path}"
                 )
             
+            elif doc_type == "split_pdf":
+                # Разделение PDF файла
+                self.log(f"Папка для сохранения: {output_path}")
+                input_file = self.file_list[0]
+                
+                split_mode = self.split_mode.get()
+                ranges_text = self.split_ranges.get() if split_mode == "ranges" else "all_pages"
+                
+                self.log("Разделение PDF файла...")
+                created_files = GenerationDocApp.split_pdf_file(
+                    input_file, output_path, 
+                    ranges_text=ranges_text,
+                    log_callback=self.log
+                )
+                
+                self.log("═" * 60)
+                self.log(f"✅ ГОТОВО! Создано файлов: {len(created_files)}")
+                self.log("═" * 60)
+                
+                self.show_message_safe(
+                    "info",
+                    "Успех",
+                    f"PDF файл успешно разделен!\n\n"
+                    f"Создано файлов: {len(created_files)}\n\n"
+                    f"Файлы сохранены в:\n{output_path}"
+                )
+            
+            elif doc_type == "rotate_pdf":
+                # Поворот страниц PDF
+                self.log(f"Файл для сохранения: {output_path}")
+                input_file = self.file_list[0]
+                
+                angle = self.rotate_angle.get()
+                pages = self.rotate_pages.get()
+                
+                self.log("Поворот страниц PDF...")
+                GenerationDocApp.rotate_pdf_pages(
+                    input_file, output_path,
+                    angle=angle,
+                    pages_range=pages,
+                    log_callback=self.log
+                )
+                
+                self.log("═" * 60)
+                self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
+                self.log("═" * 60)
+                
+                self.show_message_safe(
+                    "info",
+                    "Успех",
+                    f"Страницы PDF успешно повернуты!\n\n"
+                    f"Угол поворота: {angle}°\n\n"
+                    f"Файл сохранен:\n{output_path}"
+                )
+            
+            elif doc_type == "extract_pdf":
+                # Извлечение страниц PDF
+                self.log(f"Файл для сохранения: {output_path}")
+                input_file = self.file_list[0]
+                
+                pages = self.extract_pages.get()
+                
+                if not pages or pages.strip() == "":
+                    self.show_message_safe(
+                        "warning",
+                        "Предупреждение",
+                        "Укажите страницы для извлечения!\n\nПример: 1-5 или 1,3,5 или 1-5,10,15-20"
+                    )
+                    return
+                
+                self.log("Извлечение страниц PDF...")
+                GenerationDocApp.extract_pdf_pages(
+                    input_file, output_path,
+                    pages_range=pages,
+                    log_callback=self.log
+                )
+                
+                self.log("═" * 60)
+                self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
+                self.log("═" * 60)
+                
+                self.show_message_safe(
+                    "info",
+                    "Успех",
+                    f"Страницы PDF успешно извлечены!\n\n"
+                    f"Диапазон: {pages}\n\n"
+                    f"Файл сохранен:\n{output_path}"
+                )
+            
+            elif doc_type == "extract_to_excel":
+                # Извлечение данных в Excel
+                self.log(f"Файл Excel для сохранения: {output_path}")
+                
+                extract_method = self.extract_method.get()
+                extract_regex = self.extract_regex.get() if extract_method == "regex" else None
+                
+                self.log(f"Метод извлечения: {extract_method}")
+                if extract_regex:
+                    self.log(f"Регулярное выражение: {extract_regex}")
+                
+                GenerationDocApp.extract_data_to_excel(
+                    self.file_list, output_path,
+                    method=extract_method,
+                    regex_pattern=extract_regex,
+                    log_callback=self.log,
+                    progress_callback=self.update_progress
+                )
+                
+                self.log("═" * 60)
+                self.log(f"✅ ГОТОВО! Данные извлечены")
+                self.log(f"  Обработано файлов: {len(self.file_list)}")
+                self.log(f"  Сохранено в: {os.path.basename(output_path)}")
+                self.log("═" * 60)
+                
+                self.show_message_safe(
+                    "info",
+                    "Успех",
+                    f"Данные успешно извлечены!\n\n"
+                    f"Обработано документов: {len(self.file_list)}\n"
+                    f"Метод: {extract_method}\n\n"
+                    f"Файл сохранен:\n{output_path}"
+                )
+            
+            elif doc_type == "number_separate":
+                # Нумерация PDF раздельно
+                self.log(f"Папка для сохранения: {output_path}")
+                self.log("Нумерация PDF файлов (раздельно)...")
+                
+                numbered_files = []
+                skipped_files = []
+                current_line2 = numbering_line2
+                
+                for idx, pdf_file in enumerate(self.file_list, 1):
+                    if self.should_stop:
+                        break
+                    
+                    self.log(f"\n[{idx}/{len(self.file_list)}] {os.path.basename(pdf_file)}")
+                    
+                    # Проверяем существование исходного файла
+                    if not os.path.exists(pdf_file):
+                        self.log(f"  ⚠ ПРОПУЩЕН: файл не найден по пути {pdf_file}")
+                        skipped_files.append(pdf_file)
+                        continue
+                    
+                    # Формируем имя выходного файла
+                    base_name = os.path.splitext(os.path.basename(pdf_file))[0]
+                    output_file = os.path.join(output_path, f"{base_name}_numbered.pdf")
+                    
+                    try:
+                        # Добавляем нумерацию к PDF
+                        GenerationDocApp.add_numbering_to_existing_pdf(
+                            pdf_file, output_file,
+                            numbering_line1, current_line2, numbering_line3,
+                            numbering_position, numbering_border,
+                            numbering_increment_mode, self.log
+                        )
+                        
+                        numbered_files.append(output_file)
+                        self.log(f"  ✓ Сохранен: {os.path.basename(output_file)}")
+                        
+                        # Инкрементируем для следующего документа если режим per_document
+                        if numbering_increment_mode in ['per_document', 'per_document_first_page'] and current_line2:
+                            current_line2 = GenerationDocApp.increment_line2(current_line2)
+                    except Exception as e:
+                        self.log(f"  ✗ ОШИБКА при обработке: {str(e)}")
+                        skipped_files.append(pdf_file)
+                        continue
+                
+                self.log("═" * 60)
+                self.log(f"✅ Успешно пронумеровано файлов: {len(numbered_files)}")
+                for f in numbered_files:
+                    self.log(f"  ✓ {os.path.basename(f)}")
+                
+                if skipped_files:
+                    self.log(f"\n⚠ Пропущено файлов: {len(skipped_files)}")
+                    for f in skipped_files:
+                        self.log(f"  ⚠ {os.path.basename(f)}")
+                
+                self.log("═" * 60)
+                
+                result_message = f"Успешно пронумеровано файлов: {len(numbered_files)}\n\n"
+                if skipped_files:
+                    result_message += f"Пропущено файлов: {len(skipped_files)}\n(файлы не найдены или возникли ошибки)\n\n"
+                result_message += f"Файлы сохранены в:\n{output_path}"
+                
+                self.show_message_safe(
+                    "info" if not skipped_files else "warning",
+                    "Результат нумерации", 
+                    result_message
+                )
+            
+            elif doc_type == "number_merge":
+                # Нумерация PDF с объединением
+                self.log(f"Файл для сохранения: {output_path}")
+                self.log("Нумерация и объединение PDF документов...")
+                
+                GenerationDocApp.merge_pdf_documents(
+                    self.file_list, output_path, self.log, use_ocr=use_ocr,
+                    numbering_line1=numbering_line1, numbering_line2=numbering_line2, numbering_line3=numbering_line3,
+                    numbering_position=numbering_position, numbering_border=numbering_border,
+                    numbering_increment_mode=numbering_increment_mode
+                )
+                
+                self.log("═" * 60)
+                self.log(f"✅ ГОТОВО! Файл сохранен: {os.path.basename(output_path)}")
+                self.log("═" * 60)
+                
+                self.show_message_safe(
+                    "info",
+                    "Успех", 
+                    f"PDF документы успешно пронумерованы и объединены!\n\n"
+                    f"Обработано файлов: {len(self.file_list)}\n\n"
+                    f"Файл сохранен:\n{output_path}"
+                )
+            
             else:
+                # word или pdf - объединение
                 self.log(f"Файл для сохранения: {output_path}")
                 if doc_type == "word":
                     self.log("Объединение Word документов...")
                     GenerationDocApp.merge_word_documents(self.file_list, output_path, self.log)
-                else:
+                elif doc_type == "pdf":
                     self.log("Объединение PDF документов...")
                     GenerationDocApp.merge_pdf_documents(
                         self.file_list, output_path, self.log, use_ocr=use_ocr,
@@ -3808,13 +4860,102 @@ class MergeTabTask:
         finally:
             if self.should_stop:
                 self.log("\n⏹ Обработка остановлена пользователем")
+            
+            # Сброс прогресса
+            self.reset_progress()
+            
             self.is_processing = False
             self.should_stop = False
             try:
                 if self.window.window.winfo_exists():
-                    self.merge_btn.configure(text="▶ Объединить (конвертировать)")
+                    self.merge_btn.configure(text="▶ Начать")
             except:
                 pass
+    
+    def update_progress(self, current, total, message=""):
+        """
+        Обновление прогресс-бара и ETA
+        
+        Args:
+            current: текущее количество обработанных элементов
+            total: общее количество элементов
+            message: дополнительное сообщение для отображения
+        """
+        def update_ui():
+            try:
+                if not self.window.window.winfo_exists():
+                    return
+                
+                # Показываем прогресс-контейнер если он скрыт
+                if not self.progress_container.winfo_viewable():
+                    self.progress_container.pack(fill=tk.X, pady=(0, 12), before=self.log_text.master)
+                
+                # Обновляем прогресс-бар
+                if total > 0:
+                    progress_percent = (current / total) * 100
+                    self.progress_bar["value"] = progress_percent
+                    self.progress_bar["maximum"] = 100
+                
+                # Обновляем текст прогресса
+                progress_text = f"Обработано: {current} из {total}"
+                if message:
+                    progress_text += f" - {message}"
+                self.progress_label.config(text=progress_text)
+                
+                # Рассчитываем и показываем ETA
+                if self.start_time and current > 0 and current < total:
+                    elapsed_time = time.time() - self.start_time
+                    avg_time_per_item = elapsed_time / current
+                    remaining_items = total - current
+                    eta_seconds = avg_time_per_item * remaining_items
+                    
+                    # Форматируем ETA
+                    if eta_seconds < 60:
+                        eta_str = f"Осталось: ~{int(eta_seconds)} сек."
+                    elif eta_seconds < 3600:
+                        minutes = int(eta_seconds / 60)
+                        seconds = int(eta_seconds % 60)
+                        eta_str = f"Осталось: ~{minutes} мин. {seconds} сек."
+                    else:
+                        hours = int(eta_seconds / 3600)
+                        minutes = int((eta_seconds % 3600) / 60)
+                        eta_str = f"Осталось: ~{hours} ч. {minutes} мин."
+                    
+                    self.eta_label.config(text=eta_str)
+                elif current >= total:
+                    self.eta_label.config(text="Завершено!")
+                else:
+                    self.eta_label.config(text="Расчет времени...")
+                
+            except Exception as e:
+                pass  # Игнорируем ошибки обновления UI
+        
+        # Планируем обновление в главном потоке
+        try:
+            self.window.window.after(0, update_ui)
+        except:
+            pass
+    
+    def reset_progress(self):
+        """Сброс прогресса"""
+        def reset_ui():
+            try:
+                if self.window.window.winfo_exists():
+                    self.progress_container.pack_forget()
+                    self.progress_bar["value"] = 0
+                    self.progress_label.config(text="")
+                    self.eta_label.config(text="")
+            except:
+                pass
+        
+        try:
+            self.window.window.after(0, reset_ui)
+        except:
+            pass
+        
+        self.start_time = None
+        self.total_items = 0
+        self.processed_items = 0
     
     def save_stamp_preset(self):
         """Сохранить текущие настройки штампа как пресет"""
@@ -3926,7 +5067,13 @@ class MergeTabTask:
             "convert": "Конвертация Word → PDF (раздельно)",
             "convert_merge": "Конвертация Word → единый PDF",
             "image": "Конвертация изображений → PDF (раздельно)",
-            "image_merge": "Конвертация изображений → единый PDF"
+            "image_merge": "Конвертация изображений → единый PDF",
+            "number_separate": "Нумерация PDF (раздельно)",
+            "number_merge": "Нумерация PDF (с объединением)",
+            "split_pdf": "Разделение PDF файла",
+            "rotate_pdf": "Поворот страниц PDF",
+            "extract_pdf": "Извлечение страниц из PDF",
+            "extract_to_excel": "Извлечение данных в Excel"
         }
         return modes.get(doc_type, "Неизвестный режим")
 
@@ -4274,6 +5421,9 @@ def _process_single_document(args):
     logs = []
     row_index = None
     
+    # Создаем инстанс кэша для проверки дублирования
+    cache = DocumentCache()
+    
     try:
         (row_index, row_data, word_template, output_folder, filename_pattern,
          required_columns, placeholders, filename_column) = args
@@ -4340,8 +5490,23 @@ def _process_single_document(args):
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
+        # Проверяем кэш перед созданием документа
+        if not cache.should_create_document(word_template, dict(row_data), filepath):
+            logs.append(f"💾 Пропущен (уже существует): {filename}")
+            return {
+                'success': True,
+                'index': row_index,
+                'filename': filename,
+                'is_incomplete': is_incomplete,
+                'error': None,
+                'logs': logs
+            }
+        
         doc.save(filepath)
         logs.append(f"💾 Сохранен: {filename}")
+        
+        # Регистрируем документ в кэше после успешного сохранения
+        cache.register_document(word_template, dict(row_data), filepath)
         
         del doc
         gc.collect()
@@ -4367,6 +5532,161 @@ def _process_single_document(args):
             'error': error_msg,
             'logs': logs
         }
+
+
+def _process_single_excel_document(args):
+    """
+    Обработка одного Excel документа (функция для параллельного выполнения).
+    
+    Args:
+        args: кортеж (row_index, row_data, excel_template, output_folder, 
+                     filename_pattern, required_columns, placeholders, 
+                     filename_column)
+    
+    Returns:
+        dict: результат обработки {
+            'success': bool,
+            'index': int,
+            'filename': str,
+            'is_incomplete': bool,
+            'error': str or None,
+            'logs': list of str
+        }
+    """
+    import pandas as pd
+    from openpyxl import load_workbook
+    import os
+    import gc  
+    import re
+    
+    logs = []
+    row_index = None
+    
+    # Создаем инстанс кэша для проверки дублирования
+    cache = DocumentCache()
+    
+    try:
+        (row_index, row_data, excel_template, output_folder, filename_pattern,
+         required_columns, placeholders, filename_column) = args
+        
+        # Загружаем Excel шаблон
+        wb = load_workbook(excel_template)
+        
+        # Проверяем обязательные поля
+        is_incomplete = any(
+            pd.isna(row_data.get(col)) or str(row_data.get(col, "")).strip() == ""
+            for col in required_columns
+        )
+        suffix = "_пусто" if is_incomplete else ""
+        
+        if is_incomplete:
+            logs.append(f"   ⚠ Обнаружены пустые обязательные поля")
+        
+        # Формируем имя файла
+        column_value = ""
+        if filename_column and filename_column in row_data:
+            column_value = row_data.get(filename_column, "")
+            if pd.isna(column_value):
+                column_value = ""
+            else:
+                column_value = str(column_value).strip()
+                # Убираем недопустимые символы
+                invalid_chars = '<>:"/\\|?*'
+                for char in invalid_chars:
+                    column_value = column_value.replace(char, '')
+                column_value = column_value.rstrip('.')
+                if not column_value:
+                    column_value = f"строка{row_index + 1}"
+        
+        if not column_value and '{column}' in filename_pattern:
+            column_value = f"строка{row_index + 1}"
+        
+        # Создаём замены для плейсхолдеров
+        replacements = {}
+        for ph in placeholders:
+            if not ph.get("active", True):
+                continue
+            
+            value = row_data.get(ph["name"], "")
+            
+            # Гарантируем что ключ содержит фигурные скобки
+            placeholder_key = ph["name"]
+            if not placeholder_key.startswith('{'):
+                placeholder_key = f"{{{placeholder_key}}}"
+            
+            replacements[placeholder_key] = value
+        
+        # Заменяем плейсхолдеры во всех ячейках всех листов
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value and isinstance(cell.value, str):
+                        cell_text = cell.value
+                        # Заменяем все плейсхолдеры
+                        for placeholder, replacement in replacements.items():
+                            if placeholder in cell_text:
+                                cell_text = cell_text.replace(placeholder, str(replacement))
+                                logs.append(f"   ✓ Замена в ячейке {cell.coordinate}: {placeholder}")
+                        cell.value = cell_text
+        
+        # Формируем имя файла
+        filename = filename_pattern.format(i=row_index + 1, suffix=suffix, column=column_value)
+        name_part, ext = os.path.splitext(filename)
+        if len(name_part) > 200:
+            name_part = name_part[:200]
+            filename = name_part + ext
+        
+        output_folder = output_folder.strip()
+        filepath = os.path.join(output_folder, filename)
+        
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Проверяем кэш перед созданием документа
+        if not cache.should_create_document(excel_template, dict(row_data), filepath):
+            logs.append(f"💾 Пропущен (уже существует): {filename}")
+            wb.close()
+            return {
+                'success': True,
+                'index': row_index,
+                'filename': filename,
+                'is_incomplete': is_incomplete,
+                'error': None,
+                'logs': logs
+            }
+        
+        # Сохраняем файл
+        wb.save(filepath)
+        logs.append(f"💾 Сохранен: {filename}")
+        
+        # Регистрируем документ в кэше после успешного сохранения
+        cache.register_document(excel_template, dict(row_data), filepath)
+        
+        wb.close()
+        del wb
+        gc.collect()
+        
+        return {
+            'success': True,
+            'index': row_index,
+            'filename': filename,
+            'is_incomplete': is_incomplete,
+            'error': None,
+            'logs': logs
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        logs.append(f"   ❌ ОШИБКА: {error_msg}")
+        
+        return {
+            'success': False,
+            'index': row_index if row_index is not None else -1,
+            'filename': None,
+            'is_incomplete': False,
+            'error': error_msg,
+            'logs': logs
+        }
+
 
 class SimpleDatePicker(tk.Frame):
     """Простой выбор даты с календарём на русском языке"""
@@ -6736,7 +8056,7 @@ class GenerationDocApp:
         
         version_label = tk.Label(
             subtitle_frame,
-            text="v3.0 • 2026",
+            text="5.0 • 2026",
             font=FONTS["small"],
             bg=COLORS["primary"],
             fg=COLORS["accent_light"]
@@ -7243,6 +8563,19 @@ class GenerationDocApp:
             
             excel_file = tab.excel_path.get()
             word_template = tab.word_template_path.get()
+            excel_template = tab.excel_template_path.get()
+            
+            # Определяем какие шаблоны использовать
+            use_word = bool(word_template)
+            use_excel = bool(excel_template)
+            
+            if use_word and use_excel:
+                tab.log(f"\n📝 Будут созданы документы обоих типов: Word и Excel")
+            elif use_word:
+                tab.log(f"\n📝 Тип документа: Word")
+            else:
+                tab.log(f"\n📊 Тип документа: Excel")
+            
             output_folder = tab.output_folder.get()
             num_workers = self.worker_processes.get()
             
@@ -7258,13 +8591,17 @@ class GenerationDocApp:
             
             tab.log(f"   ✓ Прочитано строк: {len(df)}")
             
-            # Определяем колонки с датами по заголовкам
+            # Определяем колонки с датами по заголовкам поддерживаем колонки с датами по заголовкам
             date_columns = [col for col in df.columns if self.is_date_column(col)]
             if date_columns:
                 tab.log(f"\n📅 Колонки с датами: {', '.join(date_columns)}")
             
-            tab.log(f"\n📝 Используемый шаблон:")
-            tab.log(f"   {word_template}")
+            tab.log(f"\n📝 Используемые шаблоны:")
+            if use_word:
+                tab.log(f"   Word: {word_template}")
+            if use_excel:
+                tab.log(f"   Excel: {excel_template}")
+            
             tab.log(f"\n⚡ Режим производительности:")
             tab.log(f"   Рабочих процессов: {num_workers}")
             if num_workers > 1:
@@ -7354,10 +8691,21 @@ class GenerationDocApp:
                     
                     row_data[ph["name"]] = value
                 
-                task = (i, row_data, word_template, output_folder, 
-                       tab.filename_pattern.get(), required_excel_columns,
-                       self.PLACEHOLDERS, tab.filename_column.get())
-                tasks.append(task)
+                # Создаём задачи для Word шаблона (если заполнен)
+                if use_word:
+                    task_word = (i, row_data, word_template, output_folder, 
+                               tab.filename_pattern.get(), required_excel_columns,
+                               self.PLACEHOLDERS, tab.filename_column.get(), "word")
+                    tasks.append(task_word)
+                
+                # Создаём задачи для Excel шаблона (если заполнен)
+                if use_excel:
+                    # Изменяем расширение в паттерне на .xlsx
+                    excel_pattern = tab.filename_pattern.get().replace('.docx', '.xlsx')
+                    task_excel = (i, row_data, excel_template, output_folder, 
+                                excel_pattern, required_excel_columns,
+                                self.PLACEHOLDERS, tab.filename_column.get(), "excel")
+                    tasks.append(task_excel)
             
             tab.log(f"\n   ✓ Подготовлено {len(tasks)} задач\n")
             
@@ -7375,11 +8723,21 @@ class GenerationDocApp:
                         tab.log("\n⚠️ Остановка обработки...")
                         break
                     
-                    result = _process_single_document(task)
+                    # Определяем тип задачи по последнему элементу кортежа
+                    task_type = task[-1]
+                    if task_type == "word":
+                        result = _process_single_document(task[:-1])  # Убираем маркер типа
+                    else:
+                        result = _process_single_excel_document(task[:-1])
+                    
                     if result['success']:
                         processed += 1
                         if result['is_incomplete']:
                             with_empty += 1
+                        
+                        # Обновляем прогресс
+                        tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
+                        
                         if processed % 20 == 0:
                             tab.log(f"   ✓ Обработано {processed}/{len(tasks)} документов...")
                     else:
@@ -7390,9 +8748,15 @@ class GenerationDocApp:
                 tab.log("")
                 
                 with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                    # Отправляем задачи на выполнение
-                    futures = {executor.submit(_process_single_document, task): task 
-                              for task in tasks}
+                    # Отправляем задачи на выполнение с учётом типа
+                    futures = {}
+                    for task in tasks:
+                        task_type = task[-1]
+                        if task_type == "word":
+                            future = executor.submit(_process_single_document, task[:-1])
+                        else:
+                            future = executor.submit(_process_single_excel_document, task[:-1])
+                        futures[future] = task
                     
                     for future in as_completed(futures):
                         # Проверяем флаг остановки
@@ -7414,6 +8778,9 @@ class GenerationDocApp:
                                 processed += 1
                                 if result['is_incomplete']:
                                     with_empty += 1
+                                
+                                # Обновляем прогресс
+                                tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
                                 
                                 if processed % 20 == 0:
                                     tab.log(f"✓ Обработано {processed}/{len(tasks)} документов...")
@@ -8497,7 +9864,6 @@ class GenerationDocApp:
         temp_pdf.close()
         
         c = rl_canvas.Canvas(temp_pdf_path, pagesize=A4)
-        page_width, page_height = A4
         
         # Список временных файлов для гарантированного удаления
         temp_files_cleanup = []
@@ -8508,6 +9874,15 @@ class GenerationDocApp:
                     log_callback(f"  OCR: страница {page_idx + 1}/{page_count}...")
                 
                 page = doc[page_idx]
+                
+                # Получаем реальный размер страницы из оригинального PDF
+                page_rect = page.rect
+                page_width = page_rect.width
+                page_height = page_rect.height
+                
+                # Устанавливаем размер страницы в canvas равным реальному размеру
+                c.setPageSize((page_width, page_height))
+                
                 pix = None
                 img = None
                 temp_img_path = None
@@ -8930,7 +10305,7 @@ class GenerationDocApp:
     def convert_word_to_pdf(file_paths, output_folder=None, log_callback=None,
                             numbering_line1=None, numbering_line2=None, numbering_line3=None,
                             numbering_position='правый-нижний', numbering_border=True,
-                            numbering_increment_mode='per_document'):
+                            numbering_increment_mode='per_document', progress_callback=None):
         """Конвертация Word документов в PDF с параллельной обработкой
         
         Args:
@@ -8943,6 +10318,7 @@ class GenerationDocApp:
             numbering_position: позиция штампа
             numbering_border: рисовать рамку
             numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
+            progress_callback: функция для обновления прогресса (current, total, message)
         
         Returns:
             список путей к созданным PDF файлам
@@ -9000,6 +10376,10 @@ class GenerationDocApp:
                             errors.append(f"{os.path.basename(result['docx_file'])}: {result['error']}")
                             if log_callback:
                                 log_callback(f"[{completed}/{total}] ✗ {os.path.basename(result['docx_file'])}: {result['error']}")
+                        
+                        # Обновляем прогресс
+                        if progress_callback:
+                            progress_callback(completed, total, f"Конвертация: {completed}/{total}")
                     
                     except Exception as e:
                         task = futures[future]
@@ -9250,6 +10630,13 @@ class GenerationDocApp:
             numbering_increment_mode: режим инкремента ('per_page' или 'per_document')
             log_callback: функция для логирования
         """
+        # Проверяем существование входного файла
+        if not os.path.exists(input_pdf_path):
+            error_msg = f"[ШТАМП] ✗ Файл не найден: {input_pdf_path}"
+            if log_callback:
+                log_callback(error_msg)
+            raise FileNotFoundError(error_msg)
+        
         if not any([numbering_line1, numbering_line2, numbering_line3]):
             if log_callback:
                 log_callback("[ШТАМП] Нумерация не задана, пропускаем")
@@ -9288,24 +10675,40 @@ class GenerationDocApp:
             temp_overlay_path = temp_overlay.name
             temp_overlay.close()
             
-            # Создаем overlay PDF со штампами
+            # Создаем overlay PDF со штампами (начинаем с A4, но будем менять размер для каждой страницы)
             c = rl_canvas.Canvas(temp_overlay_path, pagesize=A4)
-            page_width, page_height = A4
             
             current_line2 = numbering_line2
             
             for page_num in range(num_pages):
+                # Получаем реальный размер текущей страницы
+                current_page = reader.pages[page_num]
+                
+                # Получаем размер из mediabox
+                page_box = current_page.mediabox
+                page_width = float(page_box.width)
+                page_height = float(page_box.height)
+                
+                # Получаем rotation страницы
+                rotation = current_page.get('/Rotate', 0)
+                
+                if log_callback and page_num == 0:
+                    log_callback(f"[ШТАМП] Размер страницы: {page_width:.1f}x{page_height:.1f}, поворот: {rotation}°")
+                
+                # Устанавливаем размер страницы overlay равным реальному размеру страницы
+                c.setPageSize((page_width, page_height))
+                
                 # При режиме per_document_first_page штампуем только первую страницу
                 if numbering_increment_mode == 'per_document_first_page' and page_num > 0:
                     # Пропускаем все страницы кроме первой, но все равно создаем пустую страницу в overlay
                     c.showPage()
                     continue
                 
-                # Добавляем штамп на страницу
+                # Добавляем штамп на страницу с правильными размерами и учётом rotation
                 GenerationDocApp.add_numbering_stamp(
                     c, page_width, page_height,
                     numbering_line1, current_line2, numbering_line3,
-                    numbering_position, numbering_border
+                    numbering_position, numbering_border, rotation
                 )
                 
                 if log_callback and page_num < 5:  # Логируем только первые 5 страниц
@@ -9368,7 +10771,7 @@ class GenerationDocApp:
     
     @staticmethod
     def add_numbering_stamp(canvas_obj, page_width, page_height, line1=None, line2=None, line3=None, 
-                          position='правый-нижний', draw_border=True):
+                          position='правый-нижний', draw_border=True, rotation=0):
         """Добавляет штамп нумерации на страницу PDF
         
         Args:
@@ -9380,6 +10783,7 @@ class GenerationDocApp:
             line3: третья строка текста
             position: позиция штампа (правый-нижний, центр-нижний, левый-нижний, левый-верхний, центр-верхний, правый-верхний)
             draw_border: рисовать рамку вокруг текста (True/False)
+            rotation: угол поворота страницы (0, 90, 180, 270)
         """
         if not any([line1, line2, line3]):
             return  # Если все параметры пустые, ничего не рисуем
@@ -9434,19 +10838,55 @@ class GenerationDocApp:
         # Определяем позицию в зависимости от параметра position
         margin = 20
         
-        # Горизонтальная позиция
-        if 'правый' in position:
-            rect_x = page_width - rect_width - margin
-        elif 'центр' in position:
-            rect_x = (page_width - rect_width) / 2
-        else:  # левый
-            rect_x = margin
+        # ВАЖНО: При наличии rotation в PDF, нам нужно рисовать с учётом этого поворота
+        # Используем canvas transformations для правильной ориентации
         
-        # Вертикальная позиция
+        # Вычисляем визуальные размеры (как видит пользователь)
+        if rotation in [90, 270]:
+            visual_width = page_height
+            visual_height = page_width
+        else:
+            visual_width = page_width
+            visual_height = page_height
+        
+        # Вычисляем позицию в визуальных координатах
+        if 'правый' in position:
+            visual_x = visual_width - rect_width - margin
+        elif 'центр' in position:
+            visual_x = (visual_width - rect_width) / 2
+        else:  # левый
+            visual_x = margin
+        
         if 'нижний' in position:
-            rect_y = margin
+            visual_y = margin
         else:  # верхний
-            rect_y = page_height - rect_height - margin
+            visual_y = visual_height - rect_height - margin
+        
+        # Применяем canvas transformations для rotation
+        canvas_obj.saveState()
+        
+        if rotation == 90:
+            # Поворот canvas на 90° по часовой
+            canvas_obj.translate(page_width, 0)
+            canvas_obj.rotate(90)
+            rect_x = visual_x
+            rect_y = visual_y
+        elif rotation == 180:
+            # Поворот на 180°
+            canvas_obj.translate(page_width, page_height)
+            canvas_obj.rotate(180)
+            rect_x = visual_x
+            rect_y = visual_y
+        elif rotation == 270:
+            # Поворот на 270° по часовой
+            canvas_obj.translate(0, page_height)
+            canvas_obj.rotate(270)
+            rect_x = visual_x
+            rect_y = visual_y
+        else:
+            # Без rotation
+            rect_x = visual_x
+            rect_y = visual_y
         
         # Рисуем прямоугольник (если нужна рамка)
         if draw_border:
@@ -9467,6 +10907,9 @@ class GenerationDocApp:
             text_x = rect_x + (rect_width - text_width) / 2
             canvas_obj.drawString(text_x, text_y, line)
             text_y -= line_height
+        
+        # Восстанавливаем состояние canvas
+        canvas_obj.restoreState()
     
     @staticmethod
     def _image_to_pdf_with_reportlab(image_path, output_pdf_path, log_callback=None, max_image_size=None, fit_mode='центр',
@@ -9542,38 +10985,6 @@ class GenerationDocApp:
             
             # Рисуем изображение
             c.drawImage(temp_img_path, x_offset, y_offset, width=scaled_width, height=scaled_height)
-            
-            # Выполняем OCR если нужно и доступен pytesseract
-            if use_ocr and PYTESSERACT_AVAILABLE:
-                try:
-                    if log_callback:
-                        log_callback(f"    OCR: распознавание текста...")
-                    
-                    ocr_data = pytesseract.image_to_data(
-                        Image.open(temp_img_path), 
-                        lang='rus+eng', 
-                        output_type=pytesseract.Output.DICT
-                    )
-                    
-                    # Добавляем распознанный текст как невидимый слой
-                    for i in range(len(ocr_data['text'])):
-                        text = ocr_data['text'][i]
-                        if text.strip():
-                            x = x_offset + ocr_data['left'][i] * scale
-                            y = page_height - y_offset - (ocr_data['top'][i] + ocr_data['height'][i]) * scale
-                            h = ocr_data['height'][i] * scale
-                            font_size = max(h * 0.7, 4)
-                            
-                            c.setFont("Helvetica", font_size)
-                            c.setFillColorRGB(0, 0, 0, alpha=0)
-                            c.drawString(x, y, text)
-                    
-                    if log_callback:
-                        log_callback(f"    ✓ OCR выполнен")
-                        
-                except Exception as e:
-                    if log_callback:
-                        log_callback(f"    ⚠ OCR не выполнен: {str(e)}")
             
             # Добавляем штамп нумерации (если указан)
             if log_callback:
@@ -9754,7 +11165,7 @@ class GenerationDocApp:
                               max_image_size=4000, fit_mode='центр',
                               numbering_line1=None, numbering_line2=None, numbering_line3=None,
                               numbering_position='правый-нижний', numbering_border=True,
-                              numbering_increment_mode='per_document'):
+                              numbering_increment_mode='per_document', progress_callback=None):
         """Конвертация изображений в PDF с опциональным OCR и параллельной обработкой
         
         Args:
@@ -9770,6 +11181,7 @@ class GenerationDocApp:
             numbering_position: позиция штампа
             numbering_border: рисовать рамку
             numbering_increment_mode: режим инкремента ('per_document' или 'per_page')
+            progress_callback: функция для обновления прогресса (current, total, message)
         
         Returns:
             список путей к созданным PDF файлам
@@ -9840,6 +11252,11 @@ class GenerationDocApp:
                 completed = 0
                 for future in as_completed(futures):
                     completed += 1
+                    
+                    # Обновляем прогресс
+                    if progress_callback:
+                        progress_callback(completed, total, f"Конвертация изображений → PDF: {completed}/{total}")
+                    
                     try:
                         result = future.result(timeout=600)  # 10 минут таймаут для OCR
                         
@@ -10023,13 +11440,388 @@ class GenerationDocApp:
             gc.collect()
             # Финальная очистка памяти
             gc.collect()
+    
+    @staticmethod
+    def split_pdf_file(input_pdf, output_folder, ranges_text, log_callback=None):
+        """
+        Разделение PDF файла на части по указанным диапазонам
+        
+        Args:
+            input_pdf: путь к исходному PDF
+            output_folder: папка для сохранения результатов
+            ranges_text: диапазоны страниц в формате "1-2; 3-5; 6; 7-13"
+            log_callback: функция для логирования
+        
+        Returns:
+            list: список созданных файлов
+        """
+        from PyPDF2 import PdfReader, PdfWriter
+        
+        if log_callback:
+            log_callback(f"Разделение PDF: {os.path.basename(input_pdf)}")
+        
+        pdf_reader = PdfReader(input_pdf)
+        total_pages = len(pdf_reader.pages)
+        base_name = os.path.splitext(os.path.basename(input_pdf))[0]
+        created_files = []
+        
+        # Режим: разделение по отдельным страницам
+        if ranges_text == "all_pages":
+            if log_callback:
+                log_callback(f"Режим: разделение по отдельным страницам (всего {total_pages} стр.)")
+            
+            ranges = [(i, i) for i in range(total_pages)]
+        else:
+            # Режим: разделение по диапазонам
+            if not ranges_text or ranges_text.strip() == "":
+                raise ValueError("Укажите диапазоны страниц!")
+            
+            if log_callback:
+                log_callback(f"Режим: разделение по диапазонам ({ranges_text})")
+            
+            # Парсим диапазоны (разделитель ; или ,)
+            ranges = []
+            for part in ranges_text.replace(';', ',').split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                
+                if '-' in part:
+                    # Диапазон вида 1-5
+                    start, end = part.split('-', 1)
+                    start = int(start.strip()) - 1  # Convert to 0-based
+                    end = int(end.strip()) - 1
+                    ranges.append((start, end))
+                else:
+                    # Одна страница
+                    page = int(part.strip()) - 1
+                    ranges.append((page, page))
+            
+            if not ranges:
+                raise ValueError("Не удалось распознать диапазоны страниц!")
+        
+        # Создаём файлы для каждого диапазона
+        for part_num, (start_page, end_page) in enumerate(ranges, 1):
+            # Проверяем границы
+            if start_page < 0 or end_page >= total_pages:
+                if log_callback:
+                    log_callback(f"  ⚠ Пропущен диапазон {start_page+1}-{end_page+1} (выходит за границы PDF)")
+                continue
+            
+            output_filename = os.path.join(output_folder, f"{base_name}_part{part_num:03d}.pdf")
+            pdf_writer = PdfWriter()
+            
+            for page_num in range(start_page, end_page + 1):
+                pdf_writer.add_page(pdf_reader.pages[page_num])
+            
+            with open(output_filename, 'wb') as output_file:
+                pdf_writer.write(output_file)
+            
+            created_files.append(output_filename)
+            if log_callback:
+                if start_page == end_page:
+                    log_callback(f"  ✓ Часть {part_num}: страница {start_page+1}")
+                else:
+                    log_callback(f"  ✓ Часть {part_num}: страницы {start_page+1}-{end_page+1}")
+        
+        return created_files
+    
+    @staticmethod
+    def rotate_pdf_pages(input_pdf, output_pdf, angle=90, pages_range="", log_callback=None):
+        """
+        Поворот страниц PDF
+        
+        Args:
+            input_pdf: путь к исходному PDF
+            output_pdf: путь к выходному PDF
+            angle: угол поворота (90, 180, 270)
+            pages_range: диапазон страниц (пусто=все, "1,3,5" или "1-10" или "1-5,10,15-20")
+            log_callback: функция для логирования
+        """
+        from PyPDF2 import PdfReader, PdfWriter
+        
+        if log_callback:
+            log_callback(f"Поворот страниц PDF: {os.path.basename(input_pdf)}")
+            log_callback(f"Угол: {angle}°")
+        
+        pdf_reader = PdfReader(input_pdf)
+        pdf_writer = PdfWriter()
+        total_pages = len(pdf_reader.pages)
+        
+        # Парсим диапазон страниц
+        pages_to_rotate = set()
+        if not pages_range or pages_range.strip() == "":
+            pages_to_rotate = set(range(total_pages))
+        else:
+            for part in pages_range.split(','):
+                part = part.strip()
+                if '-' in part:
+                    start, end = part.split('-')
+                    start = int(start.strip()) - 1  # Convert to 0-based
+                    end = int(end.strip()) - 1
+                    pages_to_rotate.update(range(start, end + 1))
+                else:
+                    pages_to_rotate.add(int(part.strip()) - 1)
+        
+        # Фильтруем недопустимые номера
+        pages_to_rotate = {p for p in pages_to_rotate if 0 <= p < total_pages}
+        
+        if log_callback:
+            if len(pages_to_rotate) == total_pages:
+                log_callback(f"Поворачиваются все страницы ({total_pages})")
+            else:
+                log_callback(f"Поворачиваются страницы: {len(pages_to_rotate)} из {total_pages}")
+        
+        # Применяем поворот
+        for page_num in range(total_pages):
+            page = pdf_reader.pages[page_num]
+            if page_num in pages_to_rotate:
+                page.rotate(int(angle))
+            pdf_writer.add_page(page)
+        
+        with open(output_pdf, 'wb') as output_file:
+            pdf_writer.write(output_file)
+        
+        if log_callback:
+            log_callback(f"✓ PDF сохранен: {os.path.basename(output_pdf)}")
+    
+    @staticmethod
+    def extract_pdf_pages(input_pdf, output_pdf, pages_range, log_callback=None):
+        """
+        Извлечение конкретных страниц из PDF
+        
+        Args:
+            input_pdf: путь к исходному PDF
+            output_pdf: путь к выходному PDF
+            pages_range: диапазон страниц ("1-5", "1,3,5", "1-5,10,15-20")
+            log_callback: функция для логирования
+        """
+        from PyPDF2 import PdfReader, PdfWriter
+        
+        if log_callback:
+            log_callback(f"Извлечение страниц из PDF: {os.path.basename(input_pdf)}")
+            log_callback(f"Диапазон: {pages_range}")
+        
+        if not pages_range or pages_range.strip() == "":
+            raise ValueError("Укажите страницы для извлечения!")
+        
+        pdf_reader = PdfReader(input_pdf)
+        pdf_writer = PdfWriter()
+        total_pages = len(pdf_reader.pages)
+        
+        # Парсим диапазон страниц
+        pages_to_extract = []
+        for part in pages_range.split(','):
+            part = part.strip()
+            if '-' in part:
+                start, end = part.split('-')
+                start = int(start.strip()) - 1  # Convert to 0-based
+                end = int(end.strip()) - 1
+                pages_to_extract.extend(range(start, end + 1))
+            else:
+                pages_to_extract.append(int(part.strip()) - 1)
+        
+        # Фильтруем недопустимые номера и убираем дубликаты
+        pages_to_extract = sorted(set(p for p in pages_to_extract if 0 <= p < total_pages))
+        
+        if not pages_to_extract:
+            raise ValueError(f"Не найдено допустимых страниц! Всего страниц в PDF: {total_pages}")
+        
+        if log_callback:
+            # Показываем первые и последние страницы
+            if len(pages_to_extract) <= 10:
+                pages_str = ', '.join(str(p+1) for p in pages_to_extract)
+            else:
+                first_five = ', '.join(str(p+1) for p in pages_to_extract[:5])
+                last_five = ', '.join(str(p+1) for p in pages_to_extract[-5:])
+                pages_str = f"{first_five} ... {last_five}"
+            log_callback(f"Извлекается {len(pages_to_extract)} страниц: {pages_str}")
+        
+        # Извлекаем страницы
+        for page_num in pages_to_extract:
+            pdf_writer.add_page(pdf_reader.pages[page_num])
+        
+        with open(output_pdf, 'wb') as output_file:
+            pdf_writer.write(output_file)
+        
+        if log_callback:
+            log_callback(f"✓ PDF сохранен: {os.path.basename(output_pdf)} ({len(pages_to_extract)} стр.)")
+    
+    @staticmethod
+    def extract_data_to_excel(file_paths, output_excel, method="full_text", 
+                              regex_pattern=None, log_callback=None, progress_callback=None):
+        """
+        Извлекает данные из документов (Word/PDF) и сохраняет в Excel
+        
+        Args:
+            file_paths: список путей к файлам для обработки
+            output_excel: путь к выходному Excel файлу
+            method: метод извлечения ('full_text', 'tables_only', 'regex')
+            regex_pattern: регулярное выражение для извлечения (если method='regex')
+            log_callback: функция для логирования
+            progress_callback: функция для обновления прогресса
+        """
+        from openpyxl import Workbook
+        from docx import Document
+        import re
+        
+        if not file_paths:
+            raise ValueError("Список файлов пуст")
+        
+        if log_callback:
+            log_callback(f"Начало извлечения данных из {len(file_paths)} файлов...")
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Extracted Data"
+        
+        # Заголовки
+        headers = ["Файл", "Путь", "Тип", "Извлеченный текст"]
+        if method == "tables_only":
+            headers.append("Таблица #")
+        ws.append(headers)
+        
+        total = len(file_paths)
+        extracted_count = 0
+        errors = []
+        
+        for idx, file_path in enumerate(file_paths, 1):
+            if progress_callback:
+                progress_callback(idx, total, f"Обработка: {os.path.basename(file_path)}")
+            
+            try:
+                filename = os.path.basename(file_path)
+                file_ext = os.path.splitext(file_path)[1].lower()
+                
+                extracted_text = ""
+                
+                if file_ext in ['.docx', '.doc']:
+                    # Извлечение из Word
+                    doc = Document(file_path)
+                    
+                    if method == "full_text":
+                        # Полный текст
+                        extracted_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+                        ws.append([filename, file_path, "Word", extracted_text])
+                        
+                    elif method == "tables_only":
+                        # Только таблицы
+                        for table_idx, table in enumerate(doc.tables, 1):
+                            table_text = []
+                            for row in table.rows:
+                                row_text = [cell.text.strip() for cell in row.cells]
+                                table_text.append(" | ".join(row_text))
+                            extracted_text = "\n".join(table_text)
+                            ws.append([filename, file_path, "Word", extracted_text, table_idx])
+                        
+                        if not doc.tables:
+                            ws.append([filename, file_path, "Word", "(нет таблиц)", 0])
+                    
+                    elif method == "regex":
+                        # По регулярному выражению
+                        full_text = "\n".join([para.text for para in doc.paragraphs])
+                        
+                        if regex_pattern:
+                            matches = re.findall(regex_pattern, full_text, re.MULTILINE | re.IGNORECASE)
+                            if matches:
+                                extracted_text = "\n".join([str(m) for m in matches])
+                            else:
+                                extracted_text = "(совпадений не найдено)"
+                        else:
+                            extracted_text = "(regex не указан)"
+                        
+                        ws.append([filename, file_path, "Word", extracted_text])
+                
+                elif file_ext == '.pdf':
+                    # Извлечение из PDF
+                    from PyPDF2 import PdfReader
+                    
+                    pdf = PdfReader(file_path)
+                    
+                    if method == "full_text":
+                        # Полный текст
+                        all_text = []
+                        for page in pdf.pages:
+                            page_text = page.extract_text()
+                            if page_text:
+                                all_text.append(page_text)
+                        extracted_text = "\n".join(all_text)
+                        ws.append([filename, file_path, "PDF", extracted_text])
+                    
+                    elif method == "tables_only":
+                        # PDF таблицы сложнее извлекать, используем текст
+                        ws.append([filename, file_path, "PDF", "(извлечение таблиц из PDF требует библиотеку tabula-py)", 0])
+                    
+                    elif method == "regex":
+                        # По регулярному выражению
+                        all_text = []
+                        for page in pdf.pages:
+                            page_text = page.extract_text()
+                            if page_text:
+                                all_text.append(page_text)
+                        full_text = "\n".join(all_text)
+                        
+                        if regex_pattern:
+                            matches = re.findall(regex_pattern, full_text, re.MULTILINE | re.IGNORECASE)
+                            if matches:
+                                extracted_text = "\n".join([str(m) for m in matches])
+                            else:
+                                extracted_text = "(совпадений не найдено)"
+                        else:
+                            extracted_text = "(regex не указан)"
+                        
+                        ws.append([filename, file_path, "PDF", extracted_text])
+                
+                else:
+                    # Неподдерживаемый формат
+                    ws.append([filename, file_path, "Unknown", "(неподдерживаемый формат)"])
+                    if log_callback:
+                        log_callback(f"  ⚠ Пропущен (неподдерживаемый формат): {filename}")
+                    continue
+                
+                extracted_count += 1
+                if log_callback:
+                    log_callback(f"[{idx}/{total}] ✓ {filename}")
+            
+            except Exception as e:
+                error_msg = f"{os.path.basename(file_path)}: {str(e)}"
+                errors.append(error_msg)
+                ws.append([os.path.basename(file_path), file_path, "Error", f"ОШИБКА: {str(e)}"])
+                if log_callback:
+                    log_callback(f"[{idx}/{total}] ✗ {error_msg}")
+        
+        # Автоматически подгоняем ширину столбцов
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 100)  # Ограничиваем максимум
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        # Сохраняем Excel
+        wb.save(output_excel)
+        
+        if log_callback:
+            log_callback(f"\n✅ Извлечение завершено!")
+            log_callback(f"  Успешно обработано: {extracted_count} файлов")
+            if errors:
+                log_callback(f"  Ошибок: {len(errors)}")
+                for error in errors[:5]:
+                    log_callback(f"    - {error}")
+                if len(errors) > 5:
+                    log_callback(f"    ... и ещё {len(errors) - 5} ошибок")
 
 class MergeDocumentsWindow:
     """Окно объединения документов с системой вкладок"""
     def __init__(self, parent):
         self.window = tk.Toplevel(parent)
         self.window.withdraw()
-        self.window.title("Объединение и конвертация документов")
+        self.window.title("Работа с документами")
         self.window.geometry("750x900")
         self.window.transient(parent)
         
@@ -10057,7 +11849,7 @@ class MergeDocumentsWindow:
         
         title_label = tk.Label(
             title_frame,
-            text="Объединение и конвертация документов",
+            text="Работа с документами",
             font=FONTS["title"],
             bg=COLORS["primary"],
             fg="white"
@@ -15105,6 +16897,10 @@ def setup_global_entry_shortcuts(root):
     
     # Привязываем универсальный обработчик ко всем событиям клавиатуры
     root.bind_all("<KeyPress>", universal_key_handler, add=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# ОКНО ВСТАВКИ ПЛЕЙСХОЛДЕРОВ (ВИЗУАЛЬНЫЙ РЕДАКТОР)
+# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
