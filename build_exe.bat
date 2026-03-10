@@ -15,7 +15,7 @@ echo.
 echo [2/5] Установка зависимостей...
 echo Установка PyInstaller и всех необходимых библиотек...
 pip install --upgrade pyinstaller
-pip install customtkinter pandas python-docx openpyxl pymorphy3 pypdf PyPDF2 pymorphy3-dicts-ru tkinterdnd2 docx2pdf pywin32 Pillow lxml PyMuPDF
+pip install customtkinter pandas python-docx openpyxl pymorphy3 pypdf PyPDF2 pymorphy3-dicts-ru tkinterdnd2 docx2pdf pywin32 Pillow lxml PyMuPDF pdfplumber
 pip install winsdk reportlab
 echo ✓ Зависимости установлены
 echo.
@@ -86,6 +86,10 @@ pyinstaller --onefile --windowed --noupx ^
     --hidden-import=pymorphy3.units ^
     --hidden-import=pypdf ^
     --hidden-import=PyPDF2 ^
+    --hidden-import=pdfplumber ^
+    --hidden-import=pdfplumber.page ^
+    --hidden-import=pdfplumber.pdf ^
+    --hidden-import=pdfplumber.utils ^
     --hidden-import=tkinterdnd2 ^
     --hidden-import=docx2pdf ^
     --hidden-import=win32com ^
@@ -121,6 +125,7 @@ pyinstaller --onefile --windowed --noupx ^
     --collect-submodules=docx ^
     --collect-submodules=PIL ^
     --collect-submodules=fitz ^
+    --collect-submodules=pdfplumber ^
     --collect-submodules=winsdk ^
     --collect-submodules=reportlab ^
     --exclude-module=matplotlib ^
