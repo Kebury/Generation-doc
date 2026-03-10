@@ -1393,176 +1393,6 @@ class TabStatusTooltip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-# ══════════════════════════════════════════════════════════════════════
-# СИСТЕМА КЭШИРОВАНИЯ ДОКУМЕНТОВ
-# ══════════════════════════════════════════════════════════════════════
-
-import hashlib
-import pickle
-
-class DocumentCache:
-    """Система кэширования для избежания повторного создания одинаковых документов"""
-    def __init__(self, cache_dir=None):
-        if cache_dir is None:
-            cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
-        
-        self.cache_dir = cache_dir
-        self.cache_file = os.path.join(cache_dir, "document_cache.pkl")
-        self.cache_data = {}
-        
-        # Создаем директорию если её нет
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        # Загружаем кэш
-        self.load_cache()
-    
-    def load_cache(self):
-        """Загрузка кэша из файла"""
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'rb') as f:
-                    self.cache_data = pickle.load(f)
-            except:
-                self.cache_data = {}
-    
-    def save_cache(self):
-        """Сохранение кэша в файл"""
-        try:
-            with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.cache_data, f)
-        except:
-            pass
-    
-    def get_file_hash(self, file_path):
-        """Вычисление хэша файла"""
-        if not os.path.exists(file_path):
-            return None
-        
-        hasher = hashlib.md5()
-        try:
-            with open(file_path, 'rb') as f:
-                # Читаем файл порциями для экономии памяти
-                for chunk in iter(lambda: f.read(8192), b''):
-                    hasher.update(chunk)
-            return hasher.hexdigest()
-        except:
-            return None
-    
-    def get_data_hash(self, data_dict):
-        """Вычисление хэша данных (словаря)"""
-        # Сериализуем словарь в строку и вычисляем хэш
-        data_str = json.dumps(data_dict, sort_keys=True, ensure_ascii=False)
-        return hashlib.md5(data_str.encode('utf-8')).hexdigest()
-    
-    def get_document_key(self, template_path, data, output_name):
-        """
-        Создание ключа для документа
-        
-        Args:
-            template_path: путь к шаблону
-            data: данные для заполнения (словарь)
-            output_name: имя выходного файла
-        
-        Returns:
-            str: уникальный ключ документа
-        """
-        template_hash = self.get_file_hash(template_path)
-        data_hash = self.get_data_hash(data)
-        
-        if template_hash is None:
-            return None
-        
-        # Комбинируем хэши
-        combined = f"{template_hash}_{data_hash}_{output_name}"
-        return hashlib.md5(combined.encode('utf-8')).hexdigest()
-    
-    def should_create_document(self, template_path, data, output_path):
-        """
-        Проверка нужно ли создавать документ
-        
-        Returns:
-            bool: True если нужно создать, False если уже существует и актуален
-        """
-        # Если выходной файл не существует - нужно создать
-        if not os.path.exists(output_path):
-            return True
-        
-        output_name = os.path.basename(output_path)
-        doc_key = self.get_document_key(template_path, data, output_name)
-        
-        if doc_key is None:
-            return True
-        
-        # Проверяем есть ли в кэше
-        if doc_key in self.cache_data:
-            cache_entry = self.cache_data[doc_key]
-            cached_output = cache_entry.get('output_path')
-            
-            # Если выходной файл совпадает и существует
-            if cached_output == output_path and os.path.exists(output_path):
-                # Проверяем что файл не был изменен
-                current_hash = self.get_file_hash(output_path)
-                cached_hash = cache_entry.get('output_hash')
-                
-                if current_hash == cached_hash:
-                    return False  # Документ актуален, не нужно создавать
-        
-        return True
-    
-    def register_document(self, template_path, data, output_path):
-        """
-        Регистрация созданного документа в кэше
-        
-        Args:
-            template_path: путь к шаблону
-            data: данные для заполнения
-            output_path: путь к созданному документу
-        """
-        output_name = os.path.basename(output_path)
-        doc_key = self.get_document_key(template_path, data, output_name)
-        
-        if doc_key is None:
-            return
-        
-        output_hash = self.get_file_hash(output_path)
-        
-        self.cache_data[doc_key] = {
-            'template_path': template_path,
-            'output_path': output_path,
-            'output_hash': output_hash,
-            'created_at': time.time()
-        }
-        
-        # Сохраняем кэш
-        self.save_cache()
-    
-    def clear_old_entries(self, max_age_days=30):
-        """Удаление старых записей из кэша"""
-        current_time = time.time()
-        max_age_seconds = max_age_days * 24 * 3600
-        
-        keys_to_remove = []
-        for key, entry in self.cache_data.items():
-            age = current_time - entry.get('created_at', 0)
-            if age > max_age_seconds:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.cache_data[key]
-        
-        if keys_to_remove:
-            self.save_cache()
-        
-        return len(keys_to_remove)
-    
-    def clear_cache(self):
-        """Полная очистка кэша"""
-        self.cache_data = {}
-        self.save_cache()
-
-# Глобальный экземпляр кэша
-document_cache = DocumentCache()
-
 # ── КЛАСС ДЛЯ ФОНОВОЙ ПРЕДЗАГРУЗКИ WORD ДОКУМЕНТОВ ───────────────────
 class WordPreloadManager:
     """Менеджер для фоновой конвертации Word документов в PDF"""
@@ -2939,16 +2769,6 @@ class MergeTabTask:
         )
         clear_all_btn.pack(side=tk.LEFT, padx=2)
         
-        cache_btn = create_modern_button(
-            btn_files_frame2, 
-            text="💾 Очистить кэш", 
-            command=self.clear_document_cache, 
-            style="warning",
-            width=14, 
-            tooltip="Очистить кэш созданных документов"
-        )
-        cache_btn.pack(side=tk.LEFT, padx=2)
-        
         # Подсказка о Drag and Drop
         if TKDND_AVAILABLE:
             hint_text = "💡 Вы можете перетаскивать файлы из системы в нужное место списка"
@@ -3794,10 +3614,10 @@ class MergeTabTask:
         
         self.log_text = ScrolledText(
             log_frame, 
-            height=6, 
+            height=10, 
             wrap=tk.WORD, 
-            bg=COLORS["bg_secondary"],
-            font=FONTS["small"],
+            bg=COLORS["card_bg"],
+            font=FONTS["mono"],
             relief=tk.FLAT,
             borderwidth=0
         )
@@ -4155,43 +3975,6 @@ class MergeTabTask:
                 messagebox.showerror(
                     "Ошибка", 
                     f"Не удалось очистить список файлов:\n{str(e)}", 
-                    parent=self.window.window
-                )
-    
-    def clear_document_cache(self):
-        """Очистить кэш созданных документов"""
-        try:
-            cache = DocumentCache()
-            entries_count = len(cache.cache)
-            
-            if entries_count == 0:
-                messagebox.showinfo(
-                    "Информация",
-                    "Кэш уже пуст",
-                    parent=self.window.window
-                )
-                return
-            
-            result = messagebox.askyesno(
-                "Подтверждение",
-                f"Очистить кэш созданных документов?\n\nВсего записей: {entries_count}\n\n"
-                f"После очистки все документы будут создаваться заново при следующей генерации.",
-                parent=self.window.window
-            )
-            
-            if result:
-                cache.clear_all()
-                self.log(f"✓ Кэш очищен ({entries_count} записей)")
-                messagebox.showinfo(
-                    "Успех",
-                    f"Кэш успешно очищен!\n\nУдалено записей: {entries_count}",
-                    parent=self.window.window
-                )
-        except Exception as e:
-            self.log(f"❌ Ошибка при очистке кэша: {str(e)}")
-            messagebox.showerror(
-                "Ошибка",
-                f"Не удалось очистить кэш:\n{str(e)}", 
                     parent=self.window.window
                 )
     
@@ -5421,9 +5204,6 @@ def _process_single_document(args):
     logs = []
     row_index = None
     
-    # Создаем инстанс кэша для проверки дублирования
-    cache = DocumentCache()
-    
     try:
         (row_index, row_data, word_template, output_folder, filename_pattern,
          required_columns, placeholders, filename_column) = args
@@ -5490,23 +5270,8 @@ def _process_single_document(args):
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
-        # Проверяем кэш перед созданием документа
-        if not cache.should_create_document(word_template, dict(row_data), filepath):
-            logs.append(f"💾 Пропущен (уже существует): {filename}")
-            return {
-                'success': True,
-                'index': row_index,
-                'filename': filename,
-                'is_incomplete': is_incomplete,
-                'error': None,
-                'logs': logs
-            }
-        
         doc.save(filepath)
         logs.append(f"💾 Сохранен: {filename}")
-        
-        # Регистрируем документ в кэше после успешного сохранения
-        cache.register_document(word_template, dict(row_data), filepath)
         
         del doc
         gc.collect()
@@ -5561,9 +5326,6 @@ def _process_single_excel_document(args):
     
     logs = []
     row_index = None
-    
-    # Создаем инстанс кэша для проверки дублирования
-    cache = DocumentCache()
     
     try:
         (row_index, row_data, excel_template, output_folder, filename_pattern,
@@ -5641,25 +5403,9 @@ def _process_single_excel_document(args):
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
-        # Проверяем кэш перед созданием документа
-        if not cache.should_create_document(excel_template, dict(row_data), filepath):
-            logs.append(f"💾 Пропущен (уже существует): {filename}")
-            wb.close()
-            return {
-                'success': True,
-                'index': row_index,
-                'filename': filename,
-                'is_incomplete': is_incomplete,
-                'error': None,
-                'logs': logs
-            }
-        
         # Сохраняем файл
         wb.save(filepath)
         logs.append(f"💾 Сохранен: {filename}")
-        
-        # Регистрируем документ в кэше после успешного сохранения
-        cache.register_document(excel_template, dict(row_data), filepath)
         
         wb.close()
         del wb
@@ -12607,14 +12353,15 @@ class FileBuilderWindow:
         
         self.log_text = ScrolledText(
             log_frame,
-            height=8,
+            height=10,
             wrap=tk.WORD,
-            bg=COLORS["bg_secondary"],
-            font=FONTS["body"],
+            bg=COLORS["card_bg"],
+            font=FONTS["mono"],
             relief=tk.FLAT,
             borderwidth=0
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.config(state=tk.DISABLED)
         
         def show_context_menu(event):
             menu = ModernContextMenu(self.log_text)
