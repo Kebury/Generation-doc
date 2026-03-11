@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import tempfile
 import time
 from datetime import datetime, timedelta
 import tkinter as tk
@@ -59,10 +60,11 @@ except ImportError:
     WIN32COM_AVAILABLE = False
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+    ImageTk = None
 
 try:
     import fitz
@@ -388,26 +390,35 @@ def insert_treeview_row(tree, values, tags=None, auto_tag=True):
     
     return tree.insert("", tk.END, values=values, tags=tags)
 
-def format_cell_value(value, date_format="%d.%m.%Y"):
+def format_cell_value(value, date_format="%d.%m.%Y", auto_detect_time=True):
     """
     Форматирование значения ячейки для отображения в таблице.
-    Даты преобразуются в формат "дд.мм.гггг", NaN/None становятся пустой строкой.
+    Даты преобразуются в формат "дд.мм.гггг" (или "дд.мм.гггг чч:мм:сс" если есть время).
+    NaN/None становятся пустой строкой.
     
     Args:
         value: Значение ячейки (любой тип)
         date_format: Формат даты (по умолчанию "%d.%m.%Y")
+        auto_detect_time: Автоматически определять наличие времени и форматировать соответственно
     
     Returns:
         str: Отформатированная строка для отображения
     """
     import pandas as pd
-    from datetime import datetime, date
+    from datetime import datetime, date, time
     
     if pd.isna(value) or value is None:
         return ""
     
+    # Обработка datetime объектов
     if hasattr(value, 'strftime'):
         try:
+            # Проверяем, есть ли время (не полночь)
+            if auto_detect_time and hasattr(value, 'hour'):
+                if value.hour != 0 or value.minute != 0 or value.second != 0:
+                    # Есть время - форматируем с временем
+                    return value.strftime('%d.%m.%Y %H:%M:%S')
+            # Только дата
             return value.strftime(date_format)
         except:
             return str(value)
@@ -418,7 +429,11 @@ def format_cell_value(value, date_format="%d.%m.%Y"):
     try:
         import numpy as np
         if isinstance(value, np.datetime64):
-            return pd.Timestamp(value).strftime(date_format)
+            ts = pd.Timestamp(value)
+            # Проверяем наличие времени
+            if auto_detect_time and (ts.hour != 0 or ts.minute != 0 or ts.second != 0):
+                return ts.strftime('%d.%m.%Y %H:%M:%S')
+            return ts.strftime(date_format)
     except:
         pass
     
@@ -427,17 +442,21 @@ def format_cell_value(value, date_format="%d.%m.%Y"):
     if not value_str:
         return ""
     
+    # Парсинг ISO формата с проверкой времени
     if '-' in value_str and len(value_str) >= 10:
         iso_patterns = [
-            '%Y-%m-%d %H:%M:%S',
-            '%Y-%m-%d %H:%M:%S.%f',
-            '%Y-%m-%d %H:%M',
-            '%Y-%m-%d',
+            ('%Y-%m-%d %H:%M:%S.%f', '%d.%m.%Y %H:%M:%S'),
+            ('%Y-%m-%d %H:%M:%S', '%d.%m.%Y %H:%M:%S'),
+            ('%Y-%m-%d %H:%M', '%d.%m.%Y %H:%M:%S'),
+            ('%Y-%m-%d', '%d.%m.%Y'),
         ]
-        for pattern in iso_patterns:
+        for in_pattern, out_format in iso_patterns:
             try:
-                dt = datetime.strptime(value_str, pattern)
-                return dt.strftime(date_format)
+                dt = datetime.strptime(value_str, in_pattern)
+                # Проверяем наличие времени
+                if auto_detect_time and (dt.hour != 0 or dt.minute != 0 or dt.second != 0):
+                    return dt.strftime('%d.%m.%Y %H:%M:%S')
+                return dt.strftime('%d.%m.%Y')
             except ValueError:
                 continue
     
@@ -1469,23 +1488,33 @@ class WordPreloadManager:
             
             # Пробуем конвертировать через win32com (Windows)
             if WIN32COM_AVAILABLE:
+                import win32com.client
+                import pythoncom
+                
+                word = None
+                doc = None
+                
                 try:
-                    import win32com.client
-                    import pythoncom
-                    
                     pythoncom.CoInitialize()
                     
-                    word = win32com.client.Dispatch("Word.Application")
-                    word.Visible = False
+                    try:
+                        word = win32com.client.DispatchEx("Word.Application")
+                    except:
+                        word = win32com.client.Dispatch("Word.Application")
+                    
+                    try:
+                        word.Visible = False
+                    except:
+                        pass  # Игнорируем ошибку установки Visible
                     
                     # Открываем Word документ
                     doc = word.Documents.Open(os.path.abspath(file_path))
                     
                     doc.SaveAs(os.path.abspath(temp_pdf_path), FileFormat=17)
                     doc.Close()
+                    doc = None
                     word.Quit()
-                    
-                    pythoncom.CoUninitialize()
+                    word = None
                     
                     return temp_pdf_path
                     
@@ -1496,6 +1525,23 @@ class WordPreloadManager:
                             os.unlink(temp_pdf_path)
                         except:
                             pass
+                
+                finally:
+                    # Очищаем COM объекты
+                    if doc:
+                        try:
+                            doc.Close(SaveChanges=False)
+                        except:
+                            pass
+                    if word:
+                        try:
+                            word.Quit()
+                        except:
+                            pass
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
             
             # Используем docx2pdf как запасной вариант
             if DOCX2PDF_AVAILABLE:
@@ -2108,7 +2154,7 @@ class TabTask:
         # СЕКЦИЯ 4: ЛОГ ВЫПОЛНЕНИЯ
         # ══════════════════════════════════════════════════════════════
         log_section, log_content = create_section(main_frame, "Лог выполнения", "📋")
-        log_section.pack(fill=tk.BOTH, expand=True)
+        log_section.pack(fill=tk.X, pady=(0, SPACING["md"]))
         
         self.log_text = ScrolledText(
             log_content,
@@ -2119,7 +2165,7 @@ class TabTask:
             relief=tk.FLAT,
             borderwidth=0
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(fill=tk.BOTH, expand=False, padx=1, pady=1)
         self.log_text.config(state=tk.DISABLED)
         
         # Контекстное меню для лога
@@ -2564,6 +2610,7 @@ class MergeTabTask:
             ("Повернуть страницы PDF", "rotate_pdf"),
             ("Извлечь страницы из PDF", "extract_pdf"),
             ("Извлечь данные в Excel", "extract_to_excel"),
+            ("Формирование документа", "form_document"),
         ]
         
         function_label = tk.Label(
@@ -2602,7 +2649,7 @@ class MergeTabTask:
             
             # Для остальных функций управляем видимостью через чекбокс
             if self.use_numbering.get():
-                self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+                self.numbering_subframe.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
             else:
                 self.numbering_subframe.pack_forget()
         
@@ -2646,6 +2693,19 @@ class MergeTabTask:
                     self.extract_pdf_frame.pack_forget()
                     self.extract_to_excel_frame.pack_forget()
                     
+                    # Управление кнопками
+                    if value == 'form_document':
+                        # Для формирования документа показываем кнопку редактора
+                        self.merge_btn.pack_forget()
+                        self.editor_btn.pack(pady=5)
+                        # Показываем ocr_frame для настроек качества
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
+                        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
+                    else:
+                        # Для остальных функций показываем обычную кнопку
+                        self.editor_btn.pack_forget()
+                        self.merge_btn.pack(pady=5)
+                    
                     # Показываем нужные фреймы в зависимости от функции
                     if value == 'word':
                         # Для Word не нужны дополнительные настройки
@@ -2653,45 +2713,45 @@ class MergeTabTask:
                     
                     elif value == 'split_pdf':
                         # Разделение PDF - показываем настройки разделения
-                        self.split_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.split_pdf_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     
                     elif value == 'rotate_pdf':
                         # Поворот страниц - показываем настройки поворота
-                        self.rotate_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.rotate_pdf_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     
                     elif value == 'extract_pdf':
                         # Извлечение страниц - показываем настройки извлечения
-                        self.extract_pdf_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.extract_pdf_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     
                     elif value == 'extract_to_excel':
                         # Извлечение данных в Excel - показываем настройки
-                        self.extract_to_excel_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.extract_to_excel_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     
                     elif value in ['pdf_to_word', 'pdf_to_word_merge']:
                         # Конвертация PDF в Word - показываем настройки OCR
-                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     
                     elif value in ['number_separate', 'number_merge']:
                         # Для функций прямой нумерации:
                         # - показываем ocr_frame
                         # - скрываем чекбокс (он не нужен)
                         # - показываем настройки нумерации (всегда)
-                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
-                        self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
+                        self.numbering_subframe.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                         # Включаем нумерацию принудительно
                         self.use_numbering.set(True)
                     
-                    else:
+                    elif value != 'form_document':
                         # Для всех остальных функций (конвертация, объединение):
                         # - показываем ocr_frame
                         # - показываем чекбокс нумерации
                         # - управление видимостью через чекбокс
-                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12))
-                        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(10, 0))
+                        self.ocr_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
+                        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                         
                         # Применяем текущее состояние чекбокса
                         if self.use_numbering.get():
-                            self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+                            self.numbering_subframe.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
                     break
         
         self.function_combo.configure(command=on_function_change)
@@ -2724,11 +2784,11 @@ class MergeTabTask:
             relief=tk.SOLID,
             borderwidth=1
         )
-        files_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        files_frame.pack(fill=tk.X, expand=False, pady=(0, 12))
         
         # Listbox с прокруткой
         list_container = tk.Frame(files_frame, bg=COLORS["bg_secondary"])
-        list_container.pack(fill=tk.BOTH, expand=True)
+        list_container.pack(fill=tk.BOTH, expand=False, pady=(0, 0))
         
         scrollbar = tk.Scrollbar(list_container)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2738,7 +2798,8 @@ class MergeTabTask:
             yscrollcommand=scrollbar.set, 
             font=FONTS["body"], 
             relief=tk.SOLID, 
-            borderwidth=1
+            borderwidth=1,
+            height=10
         )
         self.files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.files_listbox.yview)
@@ -3536,9 +3597,10 @@ class MergeTabTask:
         # (фрейм создается, но не pack-ается до нажатия кнопки)
         
         # ═══ ЧЕКБОКС НУМЕРАЦИИ ═══
-        # Создаем фрейм-контейнер для чекбокса нумерации
-        self.numbering_checkbox_frame = tk.Frame(self.ocr_frame, bg=COLORS["bg_secondary"])
-        self.numbering_checkbox_frame.pack(fill=tk.X, pady=(10, 0))
+        # Создаем фрейм-контейнер для чекбокса нумерации (отдельно от ocr_frame)
+        self.numbering_checkbox_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        # Будет показан динамически в зависимости от выбранной функции
+        # self.numbering_checkbox_frame.pack(fill=tk.X, pady=(10, 0))
         
         self.numbering_checkbox = tk.Checkbutton(
             self.numbering_checkbox_frame,
@@ -3560,15 +3622,17 @@ class MergeTabTask:
         )
         
         # ═══ НУМЕРАЦИЯ / ШТАМП ═══
-        # Создаем фрейм нумерации, который будет показываться/скрываться
+        # Создаем фрейм нумерации, который будет показываться/скрываться (отдельно от ocr_frame)
         self.numbering_subframe = tk.LabelFrame(
-            self.ocr_frame,
+            main_frame,
             text=" Нумерация ",
-            font=FONTS["body"],
-            padx=8,
-            pady=6,
+            font=FONTS["heading"],
+            padx=12,
+            pady=12,
             bg=COLORS["bg_secondary"],
-            fg=COLORS["text_primary"]
+            fg=COLORS["text_primary"],
+            relief=tk.SOLID,
+            borderwidth=1
         )
         # По умолчанию скрыт - будет показан при выборе соответствующей функции
         # self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
@@ -4109,11 +4173,29 @@ class MergeTabTask:
         ).pack(pady=(10, 0))
         
         # Кнопка запуска (перед логами)
-        btn_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
-        btn_frame.pack(fill=tk.X, pady=(12, 12))
+        self.btn_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        self.btn_frame.pack(fill=tk.X, pady=(12, 12))
+        
+        # Кнопка для формирования документа
+        self.editor_btn = tk.Button(
+            self.btn_frame,
+            text="📝 Открыть редактор",
+            command=self.open_document_editor,
+            font=FONTS["button"],
+            bg=COLORS["primary"],
+            fg="white",
+            activebackground=COLORS["primary_hover"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=30,
+            pady=12,
+            width=30
+        )
+        # Скрыта по умолчанию, показывается только для form_document
         
         self.merge_btn = tk.Button(
-            btn_frame,
+            self.btn_frame,
             text="▶ Начать",
             command=self.merge_documents,
             font=FONTS["button"],
@@ -4154,17 +4236,6 @@ class MergeTabTask:
         )
         self.progress_bar.pack(fill=tk.X)
         
-        # ETA лейбл (оставшееся время)
-        self.eta_label = tk.Label(
-            progress_container,
-            text="",
-            font=FONTS["small"],
-            bg=COLORS["bg_secondary"],
-            fg=COLORS["text_secondary"],
-            anchor="e"
-        )
-        self.eta_label.pack(fill=tk.X, pady=(5, 0))
-        
         # Скрываем прогресс по умолчанию
         progress_container.pack_forget()
         self.progress_container = progress_container
@@ -4181,7 +4252,7 @@ class MergeTabTask:
             relief=tk.SOLID,
             borderwidth=1
         )
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
+        log_frame.pack(fill=tk.X, expand=False, pady=(0, 0))
         
         self.log_text = ScrolledText(
             log_frame, 
@@ -4192,7 +4263,7 @@ class MergeTabTask:
             relief=tk.FLAT,
             borderwidth=0
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(fill=tk.BOTH, expand=False, padx=1, pady=1)
         self.log_text.config(state=tk.DISABLED)
         
         # Контекстное меню для лога
@@ -4210,9 +4281,8 @@ class MergeTabTask:
             # По умолчанию word - скрываем настройки PDF
             self.ocr_frame.pack_forget()
         elif current_value in ['number_separate', 'number_merge']:
-            # Для функций нумерации - скрываем чекбокс, показываем настройки, включаем нумерацию
-            self.numbering_checkbox_frame.pack_forget()
-            self.numbering_subframe.pack(fill=tk.X, pady=(10, 0))
+            # Для функций нумерации - показываем настройки, включаем нумерацию
+            self.numbering_subframe.pack(fill=tk.X, pady=(0, 12), before=self.btn_frame)
             self.use_numbering.set(True)
         else:
             # Для остальных функций - чекбокс выключен по умолчанию, настройки нумерации скрыты
@@ -4346,6 +4416,10 @@ class MergeTabTask:
                 valid = file_path.lower().endswith(valid_exts)
             elif doc_type == 'extract_to_excel':
                 valid = file_path.lower().endswith(('.docx', '.pdf'))
+            elif doc_type == 'form_document':
+                # Для формирования документа принимаем Word, PDF и изображения
+                valid_exts = ('.pdf', '.docx', '.doc', '.jpg', '.jpeg', '.png', '.bmp', '.gif')
+                valid = file_path.lower().endswith(valid_exts)
             
             if not valid:
                 invalid_count += 1
@@ -4373,6 +4447,8 @@ class MergeTabTask:
                 file_type = "изображения (.jpg, .png, .bmp, .tiff, .gif)"
             elif doc_type == 'extract_to_excel':
                 file_type = "Word (.docx) или PDF (.pdf)"
+            elif doc_type == 'form_document':
+                file_type = "Word (.docx, .doc), PDF (.pdf) или изображения (.jpg, .png, .bmp, .gif)"
             else:
                 file_type = "поддерживаемые"
             
@@ -4410,6 +4486,14 @@ class MergeTabTask:
             ]
         elif doc_type in ["pdf_to_word", "pdf_to_word_merge"]:
             filetypes = [("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
+        elif doc_type == "form_document":
+            filetypes = [
+                ("Поддерживаемые файлы", "*.pdf *.docx *.doc *.png *.jpg *.jpeg *.bmp *.gif"),
+                ("PDF файлы", "*.pdf"),
+                ("Word документы", "*.docx *.doc"),
+                ("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                ("Все файлы", "*.*")
+            ]
         else:
             filetypes = [("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
         
@@ -4471,6 +4555,14 @@ class MergeTabTask:
                 ("BMP", "*.bmp"),
                 ("TIFF", "*.tiff *.tif"),
                 ("GIF", "*.gif"),
+                ("Все файлы", "*.*")
+            ]
+        elif doc_type == "form_document":
+            filetypes = [
+                ("Поддерживаемые файлы", "*.pdf *.docx *.doc *.png *.jpg *.jpeg *.bmp *.gif"),
+                ("PDF файлы", "*.pdf"),
+                ("Word документы", "*.docx *.doc"),
+                ("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"),
                 ("Все файлы", "*.*")
             ]
         elif doc_type == "extract_to_excel":
@@ -4670,6 +4762,31 @@ class MergeTabTask:
             self.window.window.after(0, _log)
         except:
             _log()
+    
+    def open_document_editor(self):
+        """Открыть редактор для формирования документа"""
+        # Проверяем, что есть файлы для добавления
+        if not self.file_list:
+            result = messagebox.askyesno(
+                "Формирование документа",
+                "Список файлов пуст.\n\nХотите открыть редактор и добавить файлы в нём?",
+                parent=self.window.window
+            )
+            if not result:
+                return
+            initial_files = []
+        else:
+            initial_files = self.file_list.copy()
+        
+        # Открываем редактор
+        try:
+            DocumentFormationEditor(self.window.window, initial_files=initial_files)
+        except Exception as e:
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось открыть редактор:\n{str(e)}",
+                parent=self.window.window
+            )
     
     def merge_documents(self):
         """Запуск или остановка объединения/конвертации документов"""
@@ -4922,7 +5039,8 @@ class MergeTabTask:
                     self.file_list, output_path, self.log,
                     numbering_line1, numbering_line2, numbering_line3,
                     numbering_position, numbering_border, numbering_increment_mode,
-                    progress_callback=self.update_progress
+                    progress_callback=self.update_progress,
+                    should_stop_callback=lambda: self.should_stop
                 )
                 
                 self.log("═" * 60)
@@ -4949,7 +5067,8 @@ class MergeTabTask:
                     ocr_language=ocr_language,
                     auto_contrast=auto_contrast,
                     sharpen=sharpen,
-                    denoise=denoise
+                    denoise=denoise,
+                    should_stop_callback=lambda: self.should_stop
                 )
                 
                 self.log("═" * 60)
@@ -5009,7 +5128,8 @@ class MergeTabTask:
                     ocr_language=ocr_language,
                     auto_contrast=auto_contrast,
                     sharpen=sharpen,
-                    denoise=denoise
+                    denoise=denoise,
+                    should_stop_callback=lambda: self.should_stop
                 )
                 
                 self.log("═" * 60)
@@ -5030,7 +5150,8 @@ class MergeTabTask:
                 GenerationDocApp.convert_and_merge_word_to_pdf(
                     self.file_list, output_path, self.log,
                     numbering_line1, numbering_line2, numbering_line3,
-                    numbering_position, numbering_border, numbering_increment_mode
+                    numbering_position, numbering_border, numbering_increment_mode,
+                    should_stop_callback=lambda: self.should_stop
                 )
                 
                 self.log("═" * 60)
@@ -5183,7 +5304,8 @@ class MergeTabTask:
                     method=extract_method,
                     regex_pattern=extract_regex,
                     log_callback=self.log,
-                    progress_callback=self.update_progress
+                    progress_callback=self.update_progress,
+                    should_stop_callback=lambda: self.should_stop
                 )
                 
                 self.log("═" * 60)
@@ -5356,7 +5478,7 @@ class MergeTabTask:
                 
                 # Показываем прогресс-контейнер если он скрыт
                 if not self.progress_container.winfo_viewable():
-                    self.progress_container.pack(fill=tk.X, pady=(0, 12), before=self.log_text.master)
+                    self.progress_container.pack(fill=tk.X, pady=(0, 12), after=self.btn_frame)
                 
                 # Обновляем прогресс-бар
                 if total > 0:
@@ -5369,31 +5491,6 @@ class MergeTabTask:
                 if message:
                     progress_text += f" - {message}"
                 self.progress_label.config(text=progress_text)
-                
-                # Рассчитываем и показываем ETA
-                if self.start_time and current > 0 and current < total:
-                    elapsed_time = time.time() - self.start_time
-                    avg_time_per_item = elapsed_time / current
-                    remaining_items = total - current
-                    eta_seconds = avg_time_per_item * remaining_items
-                    
-                    # Форматируем ETA
-                    if eta_seconds < 60:
-                        eta_str = f"Осталось: ~{int(eta_seconds)} сек."
-                    elif eta_seconds < 3600:
-                        minutes = int(eta_seconds / 60)
-                        seconds = int(eta_seconds % 60)
-                        eta_str = f"Осталось: ~{minutes} мин. {seconds} сек."
-                    else:
-                        hours = int(eta_seconds / 3600)
-                        minutes = int((eta_seconds % 3600) / 60)
-                        eta_str = f"Осталось: ~{hours} ч. {minutes} мин."
-                    
-                    self.eta_label.config(text=eta_str)
-                elif current >= total:
-                    self.eta_label.config(text="Завершено!")
-                else:
-                    self.eta_label.config(text="Расчет времени...")
                 
             except Exception as e:
                 pass  # Игнорируем ошибки обновления UI
@@ -5412,7 +5509,6 @@ class MergeTabTask:
                     self.progress_container.pack_forget()
                     self.progress_bar["value"] = 0
                     self.progress_label.config(text="")
-                    self.eta_label.config(text="")
             except:
                 pass
         
@@ -5788,7 +5884,10 @@ def _convert_single_pdf(args):
                 try:
                     # Используем DispatchEx для нового экземпляра Word
                     word = win32com.client.DispatchEx("Word.Application")
-                    word.Visible = False
+                    try:
+                        word.Visible = False
+                    except:
+                        pass  # Игнорируем ошибку установки Visible
                     word.DisplayAlerts = 0  # Выключаем все диалоги
                     
                     # Открываем документ с таймаутом
@@ -5930,6 +6029,12 @@ def _process_single_document(args):
             
             value = row_data.get(ph["name"], "")
             
+            # Форматируем значение (даты, числа и т.д.)
+            if not pd.isna(value) and value != "":
+                value = format_cell_value(value, auto_detect_time=True)
+            else:
+                value = ""
+            
             # Гарантируем что ключ содержит фигурные скобки
             placeholder_key = ph["name"]
             if not placeholder_key.startswith('{'):
@@ -6057,6 +6162,12 @@ def _process_single_excel_document(args):
                 continue
             
             value = row_data.get(ph["name"], "")
+            
+            # Форматируем значение (даты, числа и т.д.)
+            if not pd.isna(value) and value != "":
+                value = format_cell_value(value, auto_detect_time=True)
+            else:
+                value = ""
             
             # Гарантируем что ключ содержит фигурные скобки
             placeholder_key = ph["name"]
@@ -8489,7 +8600,7 @@ class GenerationDocApp:
         
         version_label = tk.Label(
             subtitle_frame,
-            text="5.0 • 2026",
+            text="6.0 • 2026",
             font=FONTS["small"],
             bg=COLORS["primary"],
             fg=COLORS["accent_light"]
@@ -9168,8 +9279,9 @@ class GenerationDocApp:
                         if result['is_incomplete']:
                             with_empty += 1
                         
-                        # Обновляем прогресс
-                        tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
+                        # Обновляем прогресс (если доступно)
+                        if hasattr(tab, 'update_progress'):
+                            tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
                         
                         if processed % 20 == 0:
                             tab.log(f"   ✓ Обработано {processed}/{len(tasks)} документов...")
@@ -9180,7 +9292,8 @@ class GenerationDocApp:
                 tab.log(f"⚡ Параллельная обработка на {num_workers} процессах...")
                 tab.log("")
                 
-                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                executor = ProcessPoolExecutor(max_workers=num_workers)
+                try:
                     # Отправляем задачи на выполнение с учётом типа
                     futures = {}
                     for task in tasks:
@@ -9195,13 +9308,15 @@ class GenerationDocApp:
                         # Проверяем флаг остановки
                         if tab.should_stop:
                             tab.log("\n⚠️ Остановка обработки...")
-                            # Отменяем оставшиеся задачи
-                            for f in futures:
-                                f.cancel()
+                            tab.log("   Отменяем оставшиеся задачи...")
+                            # Принудительно останавливаем executor
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            tab.log("   ✓ Остановка завершена")
                             break
                         
                         try:
-                            result = future.result(timeout=300)
+                            # Используем короткий таймаут чтобы быстрее реагировать на остановку
+                            result = future.result(timeout=60)
                             
                             # Выводим логи из результата
                             for log_msg in result.get('logs', []):
@@ -9212,8 +9327,9 @@ class GenerationDocApp:
                                 if result['is_incomplete']:
                                     with_empty += 1
                                 
-                                # Обновляем прогресс
-                                tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
+                                # Обновляем прогресс (если доступно)
+                                if hasattr(tab, 'update_progress'):
+                                    tab.update_progress(processed, len(tasks), f"Обработка документов: {processed}/{len(tasks)}")
                                 
                                 if processed % 20 == 0:
                                     tab.log(f"✓ Обработано {processed}/{len(tasks)} документов...")
@@ -9222,8 +9338,15 @@ class GenerationDocApp:
                                 errors.append(f"Строка {result['index'] + 1}: {result['error']}")
                         
                         except Exception as e:
-                            task = futures[future]
-                            errors.append(f"Строка {task[0] + 1}: Критическая ошибка - {str(e)}")
+                            if not tab.should_stop:
+                                task = futures[future]
+                                errors.append(f"Строка {task[0] + 1}: Критическая ошибка - {str(e)}")
+                finally:
+                    # Гарантируем остановку executor
+                    if not tab.should_stop:
+                        executor.shutdown(wait=True)
+                    else:
+                        executor.shutdown(wait=False, cancel_futures=True)
             
             # === ИТОГИ ===
             tab.log("\n" + "═" * 60)
@@ -10710,7 +10833,10 @@ class GenerationDocApp:
         word = None
         try:
             word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
+            try:
+                word.Visible = False
+            except:
+                pass  # Игнорируем ошибку установки Visible
             word.DisplayAlerts = 0  # Отключаем все диалоги
             
             doc = word.Documents.Open(docx_file)
@@ -10738,7 +10864,8 @@ class GenerationDocApp:
     def convert_word_to_pdf(file_paths, output_folder=None, log_callback=None,
                             numbering_line1=None, numbering_line2=None, numbering_line3=None,
                             numbering_position='правый-нижний', numbering_border=True,
-                            numbering_increment_mode='per_document', progress_callback=None):
+                            numbering_increment_mode='per_document', progress_callback=None,
+                            should_stop_callback=None):
         """Конвертация Word документов в PDF с параллельной обработкой
         
         Args:
@@ -10792,14 +10919,22 @@ class GenerationDocApp:
             else:
                 errors.append(f"{os.path.basename(result['docx_file'])}: {result['error']}")
         else:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 futures = {executor.submit(_convert_single_pdf, task): task for task in tasks}
                 
                 completed = 0
                 for future in as_completed(futures):
+                    # Проверка флага остановки
+                    if should_stop_callback and should_stop_callback():
+                        if log_callback:
+                            log_callback("\n⚠️ Остановка обработки...")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    
                     completed += 1
                     try:
-                        result = future.result(timeout=300)  # 5 минут таймаут
+                        result = future.result(timeout=60)  # Уменьшен таймаут
                         
                         if result['success']:
                             converted_files.append(result['pdf_file'])
@@ -10815,11 +10950,17 @@ class GenerationDocApp:
                             progress_callback(completed, total, f"Конвертация: {completed}/{total}")
                     
                     except Exception as e:
-                        task = futures[future]
-                        docx_file = task[0]
-                        errors.append(f"{os.path.basename(docx_file)}: Критическая ошибка - {str(e)}")
-                        if log_callback:
-                            log_callback(f"[{completed}/{total}] ✗ {os.path.basename(docx_file)}: {str(e)}")
+                        if not (should_stop_callback and should_stop_callback()):
+                            task = futures[future]
+                            docx_file = task[0]
+                            errors.append(f"{os.path.basename(docx_file)}: Критическая ошибка - {str(e)}")
+                            if log_callback:
+                                log_callback(f"[{completed}/{total}] ✗ {os.path.basename(docx_file)}: {str(e)}")
+            finally:
+                if should_stop_callback and should_stop_callback():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
         
         if errors:
             error_msg = "Ошибки при конвертации:\n" + "\n".join(errors[:10])
@@ -10867,7 +11008,8 @@ class GenerationDocApp:
     def convert_and_merge_word_to_pdf(file_paths, output_file, log_callback=None,
                                       numbering_line1=None, numbering_line2=None, numbering_line3=None,
                                       numbering_position='правый-нижний', numbering_border=True,
-                                      numbering_increment_mode='per_document'):
+                                      numbering_increment_mode='per_document',
+                                      should_stop_callback=None):
         """Конвертация Word документов в PDF и объединение в один файл
         
         Args:
@@ -10906,6 +11048,12 @@ class GenerationDocApp:
                 log_callback(f"Конвертация {total} документов...")
             
             for idx, docx_file in enumerate(file_paths, 1):
+                # Проверка флага остановки
+                if should_stop_callback and should_stop_callback():
+                    if log_callback:
+                        log_callback("\n⚠️ Остановка обработки...")
+                    break
+                
                 try:
                     if log_callback:
                         log_callback(f"  [{idx}/{total}] {os.path.basename(docx_file)}...")
@@ -11637,7 +11785,8 @@ class GenerationDocApp:
                               numbering_position='правый-нижний', numbering_border=True,
                               numbering_increment_mode='per_document', progress_callback=None,
                               jpeg_quality=95, pdf_dpi=300, ocr_language='ru',
-                              auto_contrast=False, sharpen=False, denoise=False):
+                              auto_contrast=False, sharpen=False, denoise=False,
+                              should_stop_callback=None):
         """Конвертация изображений в PDF с опциональным OCR и параллельной обработкой
         
         Args:
@@ -11724,11 +11873,19 @@ class GenerationDocApp:
                     log_callback(f"  ✗ Ошибка: {os.path.basename(result['image_file'])}: {result['error']}")
         else:
             # Параллельная обработка для нескольких файлов
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 futures = {executor.submit(_convert_single_image, task): task for task in tasks}
                 
                 completed = 0
                 for future in as_completed(futures):
+                    # Проверка флага остановки
+                    if should_stop_callback and should_stop_callback():
+                        if log_callback:
+                            log_callback("\n⚠️ Остановка обработки...")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    
                     completed += 1
                     
                     # Обновляем прогресс
@@ -11736,7 +11893,7 @@ class GenerationDocApp:
                         progress_callback(completed, total, f"Конвертация изображений → PDF: {completed}/{total}")
                     
                     try:
-                        result = future.result(timeout=600)  # 10 минут таймаут для OCR
+                        result = future.result(timeout=120)  # Уменьшен таймаут до 2 минут
                         
                         if result['success']:
                             converted_files.append(result['pdf_file'])
@@ -11749,15 +11906,21 @@ class GenerationDocApp:
                                 log_callback(f"[{completed}/{total}] ✗ {os.path.basename(result['image_file'])}: {result['error']}")
                     
                     except Exception as e:
-                        task = futures[future]
-                        image_file = task[0]
-                        errors.append(f"{os.path.basename(image_file)}: Критическая ошибка - {str(e)}")
-                        if log_callback:
-                            log_callback(f"[{completed}/{total}] ✗ {os.path.basename(image_file)}: {str(e)}")
+                        if not (should_stop_callback and should_stop_callback()):
+                            task = futures[future]
+                            image_file = task[0]
+                            errors.append(f"{os.path.basename(image_file)}: Критическая ошибка - {str(e)}")
+                            if log_callback:
+                                log_callback(f"[{completed}/{total}] ✗ {os.path.basename(image_file)}: {str(e)}")
                     
                     # ОПТИМИЗАЦИЯ: Очистка памяти после каждых 3 файлов
                     if completed % 3 == 0:
                         gc.collect()
+            finally:
+                if should_stop_callback and should_stop_callback():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
         
         # Финальная очистка памяти
         gc.collect()
@@ -12135,7 +12298,8 @@ class GenerationDocApp:
     
     @staticmethod
     def extract_data_to_excel(file_paths, output_excel, method="full_text", 
-                              regex_pattern=None, log_callback=None, progress_callback=None):
+                              regex_pattern=None, log_callback=None, progress_callback=None,
+                              should_stop_callback=None):
         """
         Извлекает данные из документов (Word/PDF) и сохраняет в Excel
         
@@ -12172,6 +12336,12 @@ class GenerationDocApp:
         errors = []
         
         for idx, file_path in enumerate(file_paths, 1):
+            # Проверка флага остановки
+            if should_stop_callback and should_stop_callback():
+                if log_callback:
+                    log_callback("\n⚠️ Остановка обработки...")
+                break
+            
             if progress_callback:
                 progress_callback(idx, total, f"Обработка: {os.path.basename(file_path)}")
             
@@ -12305,7 +12475,8 @@ class GenerationDocApp:
     @staticmethod
     def convert_pdf_to_word(file_paths, output_folder, log_callback=None, progress_callback=None, 
                            use_ocr=True, ocr_resolution=2.0, pdf_dpi=300, ocr_language='ru',
-                           auto_contrast=False, sharpen=False, denoise=False):
+                           auto_contrast=False, sharpen=False, denoise=False,
+                           should_stop_callback=None):
         """
         Конвертирует PDF файлы в Word документы с попыткой сохранения форматирования
         
@@ -12385,6 +12556,12 @@ class GenerationDocApp:
         
         try:
             for idx, pdf_path in enumerate(file_paths, 1):
+                # Проверка флага остановки
+                if should_stop_callback and should_stop_callback():
+                    if log_callback:
+                        log_callback("\n⚠️ Остановка обработки...")
+                    break
+                
                 if progress_callback:
                     progress_callback(idx, total, f"Конвертация: {os.path.basename(pdf_path)}")
                 
@@ -12828,6 +13005,1687 @@ class GenerationDocApp:
         
         if processed_count == 0:
             raise Exception(f"Не удалось обработать ни одного файла. Ошибок: {len(errors)}")
+
+class DocumentFormationEditor:
+    """Редактор для формирования документа из Word, PDF и изображений"""
+    def __init__(self, parent, initial_files=None):
+        self.parent = parent
+        self.pages = []  # Список страниц: {'source': filepath, 'page_num': int, 'rotation': 0/90/180/270, 'preview': PIL.Image}
+        self.selected_pages = []  # Список индексов выделенных страниц (множественное выделение)
+        self.drag_data = {
+            "dragging": False,
+            "start_index": None,
+            "start_x": 0,
+            "start_y": 0,
+            "last_marker_x": 0,  # Для throttling обновлений маркера
+            "last_marker_y": 0,
+            "drag_indices": [],  # Индексы перетаскиваемых страниц
+            "insert_marker": None,  # Виджет-маркер места вставки (вертикальная линия)
+            "insert_position": None,  # Позиция для вставки
+            "placeholder_widgets": [],  # Заменители для перетаскиваемых страниц
+            "drag_phantom": None  # Фантомное окно для визуализации
+        }
+        self.page_widgets = []  # Кэш виджетов страниц для оптимизации
+        self.zoom_scale = 1.0  # Масштаб отображения страниц (0.1 - 2.0)
+        self.zoom_refresh_timer = None  # Таймер для debounce при масштабировании
+        
+        self.window = tk.Toplevel(parent)
+        self.window.withdraw()
+        self.window.title("Формирование документа")
+        self.window.geometry("1200x800")
+        self.window.transient(parent)
+        
+        self.window.update_idletasks()
+        parent.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (1200 // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (800 // 2)
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.create_widgets()
+        
+        # Обработчик изменения размера окна для пересчета колонок
+        self.resize_timer = None
+        self.window.bind("<Configure>", self._on_window_resize)
+        
+        # Загружаем начальные файлы
+        if initial_files:
+            for file_path in initial_files:
+                self.add_file(file_path)
+        
+        self.window.deiconify()
+    
+    def create_widgets(self):
+        """Создание интерфейса редактора"""
+        # Заголовок
+        title_frame = tk.Frame(self.window, bg=COLORS["primary"], height=60)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
+        
+        tk.Label(
+            title_frame,
+            text="Формирование документа",
+            font=("Segoe UI", 14, "bold"),
+            bg=COLORS["primary"],
+            fg="white"
+        ).pack(side=tk.LEFT, padx=20, pady=15)
+        
+        # Кнопка помощи
+        help_btn = tk.Button(
+            title_frame,
+            text="❓",
+            command=self.show_help,
+            bg=COLORS["primary"],
+            fg="white",
+            font=("Segoe UI", 12, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=10,
+            pady=5
+        )
+        help_btn.pack(side=tk.RIGHT, padx=20, pady=15)
+        
+        # Основной контейнер
+        main_container = tk.Frame(self.window, bg=COLORS["bg_secondary"])
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Левая панель - превью страниц
+        left_panel = tk.Frame(main_container, bg=COLORS["bg_secondary"], width=800)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(
+            left_panel,
+            text="Страницы документа:",
+            font=FONTS["heading"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor="w", pady=(0, 5))
+        
+        # Canvas для страниц с прокруткой
+        canvas_container = tk.Frame(left_panel, bg=COLORS["bg_secondary"])
+        canvas_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.pages_canvas = tk.Canvas(canvas_container, bg="white", highlightthickness=1, highlightbackground=COLORS["border"])
+        scrollbar_y = tk.Scrollbar(canvas_container, orient="vertical", command=self.pages_canvas.yview)
+        scrollbar_x = tk.Scrollbar(canvas_container, orient="horizontal", command=self.pages_canvas.xview)
+        
+        self.pages_scrollable_frame = tk.Frame(self.pages_canvas, bg="white")
+        
+        self.pages_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.pages_canvas.configure(scrollregion=self.pages_canvas.bbox("all"))
+        )
+        
+        self.pages_canvas.create_window((0, 0), window=self.pages_scrollable_frame, anchor="nw")
+        self.pages_canvas.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        
+        scrollbar_y.pack(side="right", fill="y")
+        scrollbar_x.pack(side="bottom", fill="x")
+        self.pages_canvas.pack(side="left", fill="both", expand=True)
+        
+        # Привязка колеса мыши для скролла и масштабирования
+        def _on_mousewheel(event):
+            # Проверяем, зажат ли Ctrl (event.state & 0x0004)
+            if event.state & 0x0004:
+                # Ctrl+колесо = масштабирование (мгновенное без debounce)
+                if event.delta > 0:
+                    self.zoom_in(instant=True)
+                else:
+                    self.zoom_out(instant=True)
+            else:
+                # Обычный скролл
+                self.pages_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Универсальная функция bind скролла для всех виджетов
+        def bind_mousewheel_recursive(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                bind_mousewheel_recursive(child)
+        
+        # Применяем скролл ко всем элементам
+        bind_mousewheel_recursive(self.pages_scrollable_frame)
+        self.pages_canvas.bind("<MouseWheel>", _on_mousewheel)
+        
+        # Сохраняем функцию для использования при обновлении страниц
+        self._bind_mousewheel_recursive = bind_mousewheel_recursive
+        
+        # Правая панель - управление
+        right_panel = tk.Frame(main_container, bg=COLORS["bg_secondary"], width=350)
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=10)
+        right_panel.pack_propagate(False)
+        
+        tk.Label(
+            right_panel,
+            text="Управление:",
+            font=FONTS["heading"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor="w", pady=(0, 10))
+        
+        # Управление масштабом
+        zoom_frame = tk.LabelFrame(
+            right_panel,
+            text=" Масштаб ",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            padx=10,
+            pady=10
+        )
+        zoom_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        zoom_controls = tk.Frame(zoom_frame, bg=COLORS["bg_secondary"])
+        zoom_controls.pack(fill=tk.X)
+        
+        zoom_out_btn = create_modern_button(
+            zoom_controls,
+            text="−",
+            command=self.zoom_out,
+            style="secondary",
+            width=3
+        )
+        zoom_out_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Заменяем Label на Entry для ручного ввода
+        self.zoom_var = tk.StringVar(value="100")
+        self.zoom_entry = tk.Entry(
+            zoom_controls,
+            textvariable=self.zoom_var,
+            font=FONTS["body"],
+            bg="white",
+            fg=COLORS["text_primary"],
+            justify="center",
+            width=5
+        )
+        self.zoom_entry.pack(side=tk.LEFT, padx=5)
+        self.zoom_entry.bind("<Return>", self._on_zoom_entry)
+        self.zoom_entry.bind("<FocusOut>", self._on_zoom_entry)
+        
+        tk.Label(
+            zoom_controls,
+            text="%",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT)
+        
+        zoom_in_btn = create_modern_button(
+            zoom_controls,
+            text="+",
+            command=self.zoom_in,
+            style="secondary",
+            width=3
+        )
+        zoom_in_btn.pack(side=tk.LEFT, padx=(5, 0))
+        
+        zoom_reset_btn = create_modern_button(
+            zoom_frame,
+            text="Сбросить (100%)",
+            command=self.zoom_reset,
+            style="secondary",
+            width=25
+        )
+        zoom_reset_btn.pack(fill=tk.X, pady=(5, 0))
+        
+        # Кнопки управления файлами
+        files_frame = tk.LabelFrame(
+            right_panel,
+            text=" Файлы ",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            padx=10,
+            pady=10
+        )
+        files_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        add_file_btn = create_modern_button(
+            files_frame,
+            text="+ Добавить файлы",
+            command=self.add_files_dialog,
+            style="primary",
+            width=25
+        )
+        add_file_btn.pack(fill=tk.X, pady=2)
+        
+        # Кнопки управления страницами
+        pages_frame = tk.LabelFrame(
+            right_panel,
+            text=" Действия со страницей ",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            padx=10,
+            pady=10
+        )
+        pages_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        rotate_left_btn = create_modern_button(
+            pages_frame,
+            text="↶ Повернуть влево (90°)",
+            command=lambda: self.rotate_selected_page(-90),
+            style="secondary",
+            width=25
+        )
+        rotate_left_btn.pack(fill=tk.X, pady=2)
+        
+        rotate_right_btn = create_modern_button(
+            pages_frame,
+            text="↷ Повернуть вправо (90°)",
+            command=lambda: self.rotate_selected_page(90),
+            style="secondary",
+            width=25
+        )
+        rotate_right_btn.pack(fill=tk.X, pady=2)
+        
+        rotate_180_btn = create_modern_button(
+            pages_frame,
+            text="↻ Повернуть на 180°",
+            command=lambda: self.rotate_selected_page(180),
+            style="secondary",
+            width=25
+        )
+        rotate_180_btn.pack(fill=tk.X, pady=2)
+        
+        tk.Frame(pages_frame, height=5, bg=COLORS["bg_secondary"]).pack()
+        
+        move_up_btn = create_modern_button(
+            pages_frame,
+            text="⬆ Переместить вверх",
+            command=self.move_page_up,
+            style="secondary",
+            width=25
+        )
+        move_up_btn.pack(fill=tk.X, pady=2)
+        
+        move_down_btn = create_modern_button(
+            pages_frame,
+            text="⬇ Переместить вниз",
+            command=self.move_page_down,
+            style="secondary",
+            width=25
+        )
+        move_down_btn.pack(fill=tk.X, pady=2)
+        
+        tk.Frame(pages_frame, height=5, bg=COLORS["bg_secondary"]).pack()
+        
+        delete_page_btn = create_modern_button(
+            pages_frame,
+            text="🗑 Удалить страницу",
+            command=self.delete_selected_page,
+            style="danger",
+            width=25
+        )
+        delete_page_btn.pack(fill=tk.X, pady=2)
+        
+        # Информация
+        info_frame = tk.LabelFrame(
+            right_panel,
+            text=" Информация ",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            padx=10,
+            pady=10
+        )
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.pages_count_label = tk.Label(
+            info_frame,
+            text="Страниц: 0",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            anchor="w"
+        )
+        self.pages_count_label.pack(fill=tk.X)
+        
+        self.selected_info_label = tk.Label(
+            info_frame,
+            text="Выбрано: -",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"],
+            anchor="w"
+        )
+        self.selected_info_label.pack(fill=tk.X, pady=(5, 0))
+        
+        # Кнопка сохранения
+        save_frame = tk.Frame(right_panel, bg=COLORS["bg_secondary"])
+        save_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        
+        save_btn = tk.Button(
+            save_frame,
+            text="💾 Сформировать PDF",
+            command=self.save_document,
+            font=FONTS["button"],
+            bg=COLORS["success"],
+            fg="white",
+            activebackground=COLORS["success_hover"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=15
+        )
+        save_btn.pack(fill=tk.X)
+        
+        # Настройка Drag and Drop для добавления файлов
+        self.setup_drag_and_drop()
+    
+    def setup_drag_and_drop(self):
+        """Настройка поддержки перетаскивания файлов из системы"""
+        if TKDND_AVAILABLE:
+            try:
+                # Регистрируем canvas для принятия файлов
+                self.pages_canvas.drop_target_register(DND_FILES)
+                self.pages_canvas.dnd_bind('<<Drop>>', self.on_files_drop)
+                
+                # Регистрируем scrollable_frame
+                self.pages_scrollable_frame.drop_target_register(DND_FILES)
+                self.pages_scrollable_frame.dnd_bind('<<Drop>>', self.on_files_drop)
+            except Exception as e:
+                pass  # Drag and drop недоступен
+    
+    def on_files_drop(self, event):
+        """Обработка перетаскивания файлов из системы"""
+        if not TKDND_AVAILABLE:
+            return
+        
+        files = parse_drop_files(event.data)
+        
+        added_count = 0
+        invalid_count = 0
+        
+        for file_path in files:
+            # Проверяем формат файла
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ['.pdf', '.docx', '.doc', '.png', '.jpg', '.jpeg', '.bmp', '.gif']:
+                try:
+                    self.add_file(file_path)
+                    added_count += 1
+                except Exception as e:
+                    invalid_count += 1
+            else:
+                invalid_count += 1
+        
+        if invalid_count > 0:
+            messagebox.showwarning(
+                "Неподходящие файлы",
+                f"Пропущено файлов: {invalid_count}\n\n"
+                f"Принимаются только Word (.docx, .doc), PDF (.pdf) и изображения (.png, .jpg, .jpeg, .bmp, .gif).",
+                parent=self.window
+            )
+    
+    def show_help(self):
+        """Показать справку"""
+        help_text = """ФОРМИРОВАНИЕ ДОКУМЕНТА
+
+Этот инструмент позволяет создавать единый PDF документ 
+из файлов разных форматов.
+
+ПОДДЕРЖИВАЕМЫЕ ФОРМАТЫ:
+• Word документы (.docx, .doc)
+• PDF файлы (.pdf)
+• Изображения (.png, .jpg, .jpeg, .bmp, .gif)
+
+КАК ИСПОЛЬЗОВАТЬ:
+1. Добавьте файлы через кнопку "Добавить файлы"
+   или перетащите их из проводника в область редактора
+2. Все страницы отобразятся в виде превью
+3. Выберите страницу, кликнув на неё
+4. Используйте кнопки для поворота или перемещения
+5. Нажмите "Сформировать PDF" для сохранения
+
+DRAG & DROP:
+• Перетаскивайте файлы из проводника Windows прямо в редактор
+• Перетаскивайте превью страниц для изменения их порядка
+• Отпустите на нужном месте для перемещения
+
+УПРАВЛЕНИЕ СТРАНИЦАМИ:
+• Поворот влево/вправо - поворот на 90°
+• Поворот на 180° - переворот страницы
+• Переместить вверх/вниз - изменить порядок кнопками
+• Удалить страницу - убрать из документа
+
+СОВЕТЫ:
+✓ Страницы можно поворачивать несколько раз
+✓ Порядок страниц можно менять как угодно
+✓ Страницы из разных файлов можно чередовать
+✓ Используйте drag & drop для быстрого добавления и перемещения
+"""
+        messagebox.showinfo("Справка - Формирование документа", help_text, parent=self.window)
+    
+    def add_files_dialog(self):
+        """Диалог выбора файлов"""
+        files = filedialog.askopenfilenames(
+            title="Выберите файлы для добавления",
+            filetypes=[
+                ("Поддерживаемые файлы", "*.pdf *.docx *.doc *.png *.jpg *.jpeg *.bmp *.gif"),
+                ("PDF файлы", "*.pdf"),
+                ("Word документы", "*.docx *.doc"),
+                ("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                ("Все файлы", "*.*")
+            ]
+        )
+        
+        if files:
+            for file_path in files:
+                self.add_file(file_path)
+    
+    def add_file(self, file_path):
+        """Добавить файл в редактор"""
+        if not os.path.exists(file_path):
+            messagebox.showerror("Ошибка", f"Файл не найден:\n{file_path}", parent=self.window)
+            return
+        
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        try:
+            if ext == '.pdf':
+                self._add_pdf_pages(file_path)
+            elif ext in ['.docx', '.doc']:
+                self._add_word_pages(file_path)
+            elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.gif']:
+                self._add_image_page(file_path)
+            else:
+                messagebox.showwarning("Предупреждение", f"Неподдерживаемый формат файла: {ext}", parent=self.window)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить файл:\n{str(e)}", parent=self.window)
+    
+    def _add_pdf_pages(self, pdf_path):
+        """Добавить страницы из PDF"""
+        if not PYMUPDF_AVAILABLE:
+            messagebox.showerror("Ошибка", "Библиотека PyMuPDF не установлена!", parent=self.window)
+            return
+        
+        try:
+            pdf_doc = fitz.open(pdf_path)
+            for page_num in range(len(pdf_doc)):
+                page = pdf_doc[page_num]
+                
+                # Рендерим страницу в изображение
+                mat = fitz.Matrix(1.5, 1.5)  # Масштаб для превью
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Конвертируем в PIL Image
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
+                
+                page_info = {
+                    'source': pdf_path,
+                    'page_num': page_num,
+                    'rotation': 0,
+                    'preview': img,
+                    'type': 'pdf'
+                }
+                
+                self.pages.append(page_info)
+            
+            pdf_doc.close()
+            self.refresh_pages_view()
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить PDF:\n{str(e)}", parent=self.window)
+    
+    def _add_word_pages(self, word_path):
+        """Добавить страницы из Word (через конвертацию в PDF)"""
+        if not PYMUPDF_AVAILABLE:
+            messagebox.showerror("Ошибка", "Библиотека PyMuPDF не установлена!", parent=self.window)
+            return
+        
+        # Показываем индикатор прогресса
+        progress_window = tk.Toplevel(self.window)
+        progress_window.title("Конвертация Word...")
+        progress_window.geometry("400x120")
+        progress_window.transient(self.window)
+        progress_window.grab_set()
+        
+        tk.Label(
+            progress_window,
+            text="Конвертация Word документа в PDF...",
+            font=FONTS["body"],
+            pady=10
+        ).pack()
+        
+        progress_label = tk.Label(
+            progress_window,
+            text="Пожалуйста подождите.\nЕсли Word откроется - НЕ закрывайте его!",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"]
+        )
+        progress_label.pack()
+        
+        progress_window.update()
+        
+        try:
+            # Конвертируем Word в PDF во временный файл
+            temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            temp_pdf.close()
+            
+            conversion_success = False
+            
+            if DOCX2PDF_AVAILABLE:
+                import sys
+                import io
+                old_stderr = sys.stderr
+                
+                try:
+                    sys.stderr = io.StringIO()
+                    
+                    from docx2pdf import convert
+                    convert(word_path, temp_pdf.name)
+                    conversion_success = True
+                    
+                except Exception:
+                    pass
+                finally:
+                    sys.stderr = old_stderr
+            
+            if not conversion_success and WIN32COM_AVAILABLE:
+                word = None
+                doc = None
+                
+                try:
+                    import pythoncom
+                    pythoncom.CoInitialize()
+                    
+                    word = win32com.client.Dispatch("Word.Application")
+                    
+                    try:
+                        word.Visible = False
+                    except:
+                        pass
+                    
+                    word.DisplayAlerts = 0
+                    
+                    doc = word.Documents.Open(os.path.abspath(word_path))
+                    
+                    doc.SaveAs(os.path.abspath(temp_pdf.name), FileFormat=17)
+                    doc.Close(False)
+                    doc = None
+                    word.Quit()
+                    word = None
+                    conversion_success = True
+                    
+                except Exception:
+                    pass
+                    
+                finally:
+                    if doc:
+                        try:
+                            doc.Close(SaveChanges=False)
+                        except:
+                            pass
+                    if word:
+                        try:
+                            word.Quit()
+                        except:
+                            pass
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+                    import gc
+                    gc.collect()
+            
+            if not conversion_success:
+                error_msg = "Не удалось конвертировать Word в PDF!\n\n"
+                
+                if not DOCX2PDF_AVAILABLE:
+                    error_msg += "❌ docx2pdf не установлен\n"
+                    error_msg += "   Установите: pip install docx2pdf\n\n"
+                else:
+                    error_msg += "❌ docx2pdf установлен, но не сработал\n\n"
+                
+                if not WIN32COM_AVAILABLE:
+                    error_msg += "❌ Microsoft Word не обнаружен\n"
+                    error_msg += "   Установите Microsoft Word\n"
+                else:
+                    error_msg += "❌ Microsoft Word обнаружен, но конвертация не удалась\n"
+                    error_msg += "   Проверьте, что Word корректно установлен\n"
+                
+                progress_window.destroy()
+                messagebox.showerror("Ошибка конвертации", error_msg, parent=self.window)
+                os.unlink(temp_pdf.name)
+                return
+            
+            pdf_doc = fitz.open(temp_pdf.name)
+            for page_num in range(len(pdf_doc)):
+                page = pdf_doc[page_num]
+                
+                # Рендерим страницу в изображение
+                mat = fitz.Matrix(1.5, 1.5)
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Конвертируем в PIL Image
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
+                
+                page_info = {
+                    'source': word_path,
+                    'page_num': page_num,
+                    'rotation': 0,
+                    'preview': img,
+                    'type': 'word',
+                    'temp_pdf': temp_pdf.name  # Сохраняем путь к временному PDF
+                }
+                
+                self.pages.append(page_info)
+            
+            pdf_doc.close()
+            
+            progress_window.destroy()
+            self.refresh_pages_view()
+            
+        except Exception as e:
+            progress_window.destroy()
+            messagebox.showerror("Ошибка", f"Не удалось загрузить Word документ:\n{str(e)}", parent=self.window)
+            if os.path.exists(temp_pdf.name):
+                os.unlink(temp_pdf.name)
+    
+    def _add_image_page(self, image_path):
+        """Добавить страницу из изображения"""
+        if not PIL_AVAILABLE:
+            messagebox.showerror("Ошибка", "Библиотека PIL не установлена!", parent=self.window)
+            return
+        
+        try:
+            img = Image.open(image_path)
+            
+            # Конвертируем в RGB если нужно
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            page_info = {
+                'source': image_path,
+                'page_num': 0,
+                'rotation': 0,
+                'preview': img.copy(),
+                'type': 'image'
+            }
+            
+            self.pages.append(page_info)
+            self.refresh_pages_view()
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить изображение:\n{str(e)}", parent=self.window)
+    
+    def refresh_pages_view(self):
+        """Обновить отображение страниц"""
+        # Уничтожаем маркер вставки перед очисткой фрейма
+        if self.drag_data.get("insert_marker"):
+            try:
+                self.drag_data["insert_marker"].destroy()
+            except:
+                pass
+            self.drag_data["insert_marker"] = None
+        
+        # Очищаем текущее содержимое
+        for widget in self.pages_scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        if not self.pages:
+            tk.Label(
+                self.pages_scrollable_frame,
+                text="Нет страниц. Добавьте файлы для начала работы.",
+                font=FONTS["body"],
+                bg="white",
+                fg=COLORS["text_secondary"]
+            ).pack(pady=50)
+        else:
+            # Отображаем страницы в сетке
+            cols = self._get_columns_count()  # Динамическое количество колонок
+            for idx, page_info in enumerate(self.pages):
+                row = idx // cols
+                col = idx % cols
+                
+                # Определяем, выделена ли страница
+                is_selected = idx in self.selected_pages
+                
+                # Динамические отступы в зависимости от масштаба
+                # При малом масштабе отступы минимальные
+                if self.zoom_scale >= 0.6:
+                    pad = max(5, int(10 * self.zoom_scale))
+                elif self.zoom_scale >= 0.3:
+                    pad = 3
+                else:
+                    pad = 2
+                
+                border_width = 2 if self.zoom_scale >= 0.5 else 1
+                
+                page_frame = tk.Frame(
+                    self.pages_scrollable_frame,
+                    bg="white",
+                    highlightthickness=border_width,
+                    highlightbackground="yellow" if is_selected else COLORS["border"]
+                )
+                page_frame.grid(row=row, column=col, padx=pad, pady=pad, sticky="nsew")
+                
+                # Сохраняем индекс в виджете для обработчиков
+                page_frame.page_index = idx
+                
+                # Превью изображения
+                preview_img = page_info['preview'].copy()
+                if page_info['rotation'] != 0:
+                    preview_img = preview_img.rotate(-page_info['rotation'], expand=True)
+                
+                # Масштабируем для превью с учетом zoom_scale
+                base_size = (200, 280)
+                max_size = (int(base_size[0] * self.zoom_scale), int(base_size[1] * self.zoom_scale))
+                preview_img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(preview_img)
+                
+                img_label = tk.Label(page_frame, image=photo, bg="white", cursor="hand2")
+                img_label.image = photo  # Сохраняем ссылку
+                img_label.pack(pady=max(1, int(5 * self.zoom_scale)))
+                img_label.page_index = idx
+                
+                # Сохраняем ссылку на img_label в page_frame для быстрого обновления
+                page_frame.img_label = img_label
+                
+                # Обработчики событий мыши
+                page_frame.bind("<ButtonPress-1>", self._on_page_click)
+                page_frame.bind("<B1-Motion>", self._on_page_drag)
+                page_frame.bind("<ButtonRelease-1>", self._on_page_release)
+                
+                img_label.bind("<ButtonPress-1>", self._on_page_click)
+                img_label.bind("<B1-Motion>", self._on_page_drag)
+                img_label.bind("<ButtonRelease-1>", self._on_page_release)
+                
+                # Информация о странице (скрываем при малом zoom)
+                if self.zoom_scale >= 0.4:
+                    info_text = f"#{idx + 1}"
+                    if page_info['type'] == 'pdf' or page_info['type'] == 'word':
+                        info_text += f" | Стр. {page_info['page_num'] + 1}"
+                    if page_info['rotation'] != 0:
+                        info_text += f" | ↻{page_info['rotation']}°"
+                    
+                    info_label = tk.Label(
+                        page_frame,
+                        text=info_text,
+                        font=FONTS["small"],
+                        bg="white",
+                        fg=COLORS["text_secondary"]
+                    )
+                    info_label.pack(pady=(0, max(1, int(5 * self.zoom_scale))))
+                    info_label.page_index = idx
+                    info_label.bind("<ButtonPress-1>", self._on_page_click)
+                    info_label.bind("<B1-Motion>", self._on_page_drag)
+                    info_label.bind("<ButtonRelease-1>", self._on_page_release)
+                    page_frame.info_label = info_label
+                
+                # Источник (скрываем при малом zoom)
+                if self.zoom_scale >= 0.4:
+                    source_name = os.path.basename(page_info['source'])
+                    if len(source_name) > 20:
+                        source_name = source_name[:17] + "..."
+                    
+                    source_label = tk.Label(
+                        page_frame,
+                        text=source_name,
+                        font=("Segoe UI", 8),
+                        bg="white",
+                        fg=COLORS["text_secondary"]
+                    )
+                    source_label.pack(pady=(0, max(1, int(5 * self.zoom_scale))))
+                    source_label.page_index = idx
+                    source_label.bind("<ButtonPress-1>", self._on_page_click)
+                    source_label.bind("<B1-Motion>", self._on_page_drag)
+                    source_label.bind("<ButtonRelease-1>", self._on_page_release)
+                    page_frame.source_label = source_label
+        
+        # Обновляем счетчик
+        self.pages_count_label.config(text=f"Страниц: {len(self.pages)}")
+        self.update_selected_info()
+        
+        # Обновляем bind скролла для всех новых виджетов
+        if hasattr(self, '_bind_mousewheel_recursive'):
+            self._bind_mousewheel_recursive(self.pages_scrollable_frame)
+    
+    def _update_zoom_visual(self):
+        """Быстрое обновление только изображений при масштабировании"""
+        if not self.pages:
+            return
+        
+        cols = self._get_columns_count()
+        
+        # Динамические отступы
+        if self.zoom_scale >= 0.6:
+            pad = max(5, int(10 * self.zoom_scale))
+        elif self.zoom_scale >= 0.3:
+            pad = 3
+        else:
+            pad = 2
+        
+        border_width = 2 if self.zoom_scale >= 0.5 else 1
+        show_labels = self.zoom_scale >= 0.4
+        
+        # Проходим по существующим виджетам
+        for widget in self.pages_scrollable_frame.winfo_children():
+            if not hasattr(widget, 'page_index'):
+                continue
+            
+            idx = widget.page_index
+            if idx >= len(self.pages):
+                continue
+            
+            page_info = self.pages[idx]
+            
+            # Обновляем grid layout (новая позиция в сетке)
+            row = idx // cols
+            col = idx % cols
+            widget.grid(row=row, column=col, padx=pad, pady=pad, sticky="nsew")
+            
+            # Обновляем толщину рамки
+            is_selected = idx in self.selected_pages
+            try:
+                widget.config(
+                    highlightthickness=border_width,
+                    highlightbackground="yellow" if is_selected else COLORS["border"]
+                )
+            except:
+                pass
+            
+            # Обновляем изображение
+            if hasattr(widget, 'img_label'):
+                try:
+                    preview_img = page_info['preview'].copy()
+                    if page_info['rotation'] != 0:
+                        preview_img = preview_img.rotate(-page_info['rotation'], expand=True)
+                    
+                    base_size = (200, 280)
+                    max_size = (int(base_size[0] * self.zoom_scale), int(base_size[1] * self.zoom_scale))
+                    preview_img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(preview_img)
+                    
+                    widget.img_label.config(image=photo)
+                    widget.img_label.image = photo
+                except:
+                    pass
+            
+            # Показываем/скрываем текстовые подписи
+            if hasattr(widget, 'info_label'):
+                if show_labels:
+                    widget.info_label.pack(pady=(0, max(1, int(5 * self.zoom_scale))))
+                else:
+                    widget.info_label.pack_forget()
+            
+            if hasattr(widget, 'source_label'):
+                if show_labels:
+                    widget.source_label.pack(pady=(0, max(1, int(5 * self.zoom_scale))))
+                else:
+                    widget.source_label.pack_forget()
+        
+        # Обновляем bind скролла для всех виджетов
+        if hasattr(self, '_bind_mousewheel_recursive'):
+            self._bind_mousewheel_recursive(self.pages_scrollable_frame)
+    
+    def _update_selection_visual(self):
+        """Быстрое обновление визуального выделения без перерисовки"""
+        for widget in self.pages_scrollable_frame.winfo_children():
+            if hasattr(widget, 'page_index'):
+                idx = widget.page_index
+                is_selected = idx in self.selected_pages
+                try:
+                    widget.config(
+                        highlightbackground="yellow" if is_selected else COLORS["border"],
+                        highlightthickness=2
+                    )
+                except:
+                    pass
+        self.update_selected_info()
+    
+    def _on_page_click(self, event):
+        """Обработка клика по странице"""
+        # Получаем индекс страницы
+        widget = event.widget
+        if not hasattr(widget, 'page_index'):
+            return
+        
+        page_index = widget.page_index
+        
+        # Проверяем, зажат ли Ctrl (используем номер клавиши для любой раскладки)
+        # event.state & 0x0004 - проверка на Control
+        ctrl_pressed = (event.state & 0x0004) != 0
+        
+        if ctrl_pressed:
+            # Множественное выделение
+            if page_index in self.selected_pages:
+                # Снимаем выделение с этой страницы
+                self.selected_pages.remove(page_index)
+            else:
+                # Добавляем к выделению
+                self.selected_pages.append(page_index)
+        else:
+            # Обычное выделение
+            # ВАЖНО: если кликнули на УЖЕ выбранную страницу (из множественного выбора),
+            # НЕ меняем выделение - это позволит перетащить все выбранные страницы
+            if page_index not in self.selected_pages:
+                # Кликнули на НЕвыбранную страницу - выделяем только её
+                self.selected_pages = [page_index]
+            elif len(self.selected_pages) == 1:
+                # Кликнули на единственную выбранную страницу - снимаем выделение
+                self.selected_pages = []
+        
+        # Сохраняем начальные данные для возможного перетаскивания
+        self.drag_data["start_index"] = page_index
+        self.drag_data["start_x"] = event.x_root
+        self.drag_data["start_y"] = event.y_root
+        self.drag_data["dragging"] = False
+        
+        # Быстрое обновление только рамок, без перерисовки
+        self._update_selection_visual()
+    
+    def _on_page_drag(self, event):
+        """Обработка перетаскивания страницы"""
+        if self.drag_data["start_index"] is None:
+            return
+        
+        # Проверяем, началось ли перетаскивание
+        if not self.drag_data["dragging"]:
+            dx = abs(event.x_root - self.drag_data["start_x"])
+            dy = abs(event.y_root - self.drag_data["start_y"])
+            
+            # Начинаем drag только при движении более 5 пикселей
+            if dx > 5 or dy > 5:
+                self._start_drag()
+        
+        if self.drag_data["dragging"]:
+            # Обновляем позицию фантома
+            if self.drag_data["drag_phantom"]:
+                self.drag_data["drag_phantom"].geometry(f"+{event.x_root + 15}+{event.y_root + 15}")
+            
+            # Обновляем маркер вставки
+            self._update_insert_marker_optimized(event.x_root, event.y_root)
+    
+    def _start_drag(self):
+        """Начать перетаскивание"""
+        self.drag_data["dragging"] = True
+        
+        # Определяем, какие страницы перетаскиваем
+        start_index = self.drag_data["start_index"]
+        
+        if start_index in self.selected_pages and len(self.selected_pages) > 0:
+            # Перетаскиваем все выделенные страницы
+            self.drag_data["drag_indices"] = sorted(self.selected_pages)
+        else:
+            # Перетаскиваем только одну страницу
+            self.drag_data["drag_indices"] = [start_index]
+            self.selected_pages = [start_index]
+        
+        # Создаем placeholder'ы для перетаскиваемых страниц (делаем их полупрозрачными)
+        cols = self._get_columns_count()
+        for idx in self.drag_data["drag_indices"]:
+            for widget in self.pages_scrollable_frame.winfo_children():
+                if hasattr(widget, 'page_index') and widget.page_index == idx:
+                    # Делаем перетаскиваемые страницы полупрозрачными
+                    widget.config(highlightbackground="#CCCCCC", highlightthickness=1)
+                    # Сохраняем ссылку на виджет
+                    self.drag_data["placeholder_widgets"].append(widget)
+                    # Снижаем видимость содержимого
+                    for child in widget.winfo_children():
+                        try:
+                            child.config(state='disabled')
+                        except:
+                            pass
+                    break
+        
+        # Создаем визуальный фантом с превью страниц
+        self._create_drag_phantom()
+        
+        # Создаем вертикальный маркер вставки
+        self._create_insert_marker()
+        
+        # Меняем курсор
+        self.pages_scrollable_frame.config(cursor="none")  # Скрываем курсор, показываем только фантом
+    
+    def _create_drag_phantom(self):
+        """Создать визуальный фантом перетаскивания с превью страниц"""
+        if self.drag_data["drag_phantom"]:
+            return
+        
+        # Создаем полупрозрачное окно
+        phantom = tk.Toplevel(self.window)
+        phantom.overrideredirect(True)
+        phantom.attributes('-alpha', 0.85)
+        phantom.attributes('-topmost', True)
+        
+        # Основная рамка
+        main_frame = tk.Frame(phantom, bg=COLORS["primary"], bd=3, relief=tk.RAISED)
+        main_frame.pack()
+        
+        # Заголовок
+        count = len(self.drag_data["drag_indices"])
+        header_text = f"📄 Перемещение: {count} стр." if count > 1 else "📄 Перемещение: 1 стр."
+        
+        header = tk.Label(
+            main_frame,
+            text=header_text,
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["primary"],
+            fg="white",
+            padx=10,
+            pady=5
+        )
+        header.pack()
+        
+        # Контейнер для превью страниц
+        preview_frame = tk.Frame(main_frame, bg="white", padx=5, pady=5)
+        preview_frame.pack()
+        
+        # Показываем превью страниц (максимум 3 для компактности)
+        max_previews = min(3, len(self.drag_data["drag_indices"]))
+        
+        for i in range(max_previews):
+            page_idx = self.drag_data["drag_indices"][i]
+            if 0 <= page_idx < len(self.pages):
+                page_info = self.pages[page_idx]
+                
+                # Получаем превью
+                preview_img = page_info['preview'].copy()
+                if page_info['rotation'] != 0:
+                    preview_img = preview_img.rotate(-page_info['rotation'], expand=True)
+                
+                # Создаем мини-превью
+                max_size = (60, 80)
+                preview_img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(preview_img)
+                
+                # Создаем рамку для каждого превью
+                page_preview_frame = tk.Frame(preview_frame, bg=COLORS["border"], bd=1, relief=tk.SOLID)
+                page_preview_frame.pack(side=tk.LEFT, padx=2)
+                
+                img_label = tk.Label(page_preview_frame, image=photo, bg="white")
+                img_label.image = photo  # Сохраняем ссылку
+                img_label.pack(padx=1, pady=1)
+        
+        # Если страниц больше 3, показываем индикатор
+        if count > 3:
+            more_label = tk.Label(
+                preview_frame,
+                text=f"+{count - 3}",
+                font=("Segoe UI", 12, "bold"),
+                bg="white",
+                fg=COLORS["primary"],
+                padx=10
+            )
+            more_label.pack(side=tk.LEFT, padx=5)
+        
+        self.drag_data["drag_phantom"] = phantom
+    
+    def _create_insert_marker(self):
+        """Создать вертикальный маркер вставки один раз"""
+        if self.drag_data["insert_marker"]:
+            return
+        
+        # Создаем вертикальную зелёную линию
+        marker = tk.Frame(
+            self.pages_scrollable_frame,
+            bg="#00FF00",  # Ярко-зелёный
+            width=6,
+            highlightbackground="#00FF00",
+            highlightthickness=0
+        )
+        
+        self.drag_data["insert_marker"] = marker
+        # Изначально скрываем
+        marker.grid_remove()
+    
+    def _update_insert_marker_optimized(self, x, y):
+        """Оптимизированное обновление маркера места вставки"""
+        try:
+            # Определяем виджет под курсором
+            target_widget = self.pages_scrollable_frame.winfo_containing(x, y)
+            
+            if not target_widget or not self.drag_data["insert_marker"]:
+                self._hide_insert_marker()
+                return
+            
+            # Ищем ближайшую страницу
+            target_index = None
+            target_frame = None
+            
+            for child in self.pages_scrollable_frame.winfo_children():
+                if hasattr(child, 'page_index'):
+                    try:
+                        if not child.winfo_exists():
+                            continue
+                        if target_widget == child or self._is_child_of(target_widget, child):
+                            target_index = child.page_index
+                            target_frame = child
+                            break
+                    except:
+                        continue
+            
+            if target_index is None or target_index in self.drag_data["drag_indices"]:
+                self._hide_insert_marker()
+                return
+            
+            if not target_frame:
+                return
+            
+            # Проверяем существование target_frame
+            try:
+                if not target_frame.winfo_exists():
+                    return
+            except:
+                return
+            
+            # Определяем позицию вставки относительно целевой страницы
+            frame_x = target_frame.winfo_rootx()
+            frame_width = target_frame.winfo_width()
+            
+            rel_x = x - frame_x
+            
+            # Определяем: вставить ДО или ПОСЛЕ целевой страницы
+            # Если курсор слева от центра - вставить до, справа - после
+            insert_before = rel_x < frame_width * 0.5
+            
+            insert_position = target_index if insert_before else target_index + 1
+            
+            # Проверяем, изменилась ли позиция
+            if self.drag_data.get("insert_position") == insert_position:
+                return  # Позиция не изменилась, не обновляем
+            
+            self.drag_data["insert_position"] = insert_position
+            
+            # Показываем маркер в новой позиции
+            self._show_vertical_marker_at(insert_position, target_frame, insert_before)
+        
+        except Exception as e:
+            # Если произошла ошибка, просто скрываем маркер
+            self._hide_insert_marker()
+    
+    def _is_child_of(self, widget, parent):
+        """Проверить, является ли виджет дочерним элементом родителя"""
+        current = widget
+        while current:
+            if current == parent:
+                return True
+            try:
+                current = current.master
+            except:
+                break
+        return False
+    
+    def _show_vertical_marker_at(self, position, reference_frame, insert_before):
+        """Показать вертикальный маркер между страницами"""
+        marker = self.drag_data["insert_marker"]
+        if not marker:
+            return
+        
+        # Проверяем, что reference_frame еще существует
+        try:
+            if not reference_frame.winfo_exists():
+                return
+        except:
+            return
+        
+        cols = self._get_columns_count()
+        row = position // cols
+        col = position % cols
+        
+        # Получаем информацию о целевом фрейме
+        try:
+            ref_row = reference_frame.page_index // cols
+            ref_col = reference_frame.page_index % cols
+        except:
+            return
+        
+        # Безопасное размещение маркера
+        try:
+            # Вычисляем где показать вертикальную линию
+            if insert_before:
+                # Линия слева от целевой страницы
+                if ref_col == 0:
+                    # Первая колонка - линия в начале строки
+                    marker.grid(row=ref_row, column=ref_col, sticky="nsw", padx=(5, 0), pady=5, rowspan=1)
+                else:
+                    # Линия между страницами
+                    marker.grid(row=ref_row, column=ref_col, sticky="nsw", padx=(0, 0), pady=5, rowspan=1)
+            else:
+                # Линия справа от целевой страницы
+                if ref_col == cols - 1:
+                    # Последняя колонка - линия в конце строки
+                    marker.grid(row=ref_row, column=ref_col, sticky="nse", padx=(0, 5), pady=5, rowspan=1)
+                else:
+                    # Линия между страницами
+                    marker.grid(row=ref_row, column=ref_col, sticky="nse", padx=(0, 0), pady=5, rowspan=1)
+        except Exception as e:
+            # Если не удалось разместить маркер, просто скрываем его
+            pass
+    
+    def _hide_insert_marker(self):
+        """Скрыть маркер вставки"""
+        # Просто убираем из grid, не уничтожаем виджет
+        if self.drag_data["insert_marker"]:
+            try:
+                self.drag_data["insert_marker"].grid_remove()
+            except:
+                pass
+        
+        self.drag_data["insert_position"] = None
+    
+    def _on_page_release(self, event):
+        """Обработка отпускания кнопки мыши"""
+        if not self.drag_data["dragging"]:
+            # Это был простой клик, уже обработан в _on_page_click
+            self.drag_data["start_index"] = None
+            return
+        
+        # Завершаем перетаскивание
+        # Используем сохраненную позицию вставки из маркера
+        insert_position = self.drag_data.get("insert_position")
+        
+        if insert_position is not None:
+            # Выполняем перемещение
+            self._move_pages_to_position(self.drag_data["drag_indices"], insert_position)
+        
+        # Очищаем drag state
+        self._cleanup_drag()
+    
+    def _move_pages_to_position(self, source_indices, insert_position):
+        """Переместить страницы в указанную позицию вставки"""
+        if not source_indices:
+            return
+        
+        # Сортируем индексы
+        source_indices = sorted(source_indices)
+        
+        # Извлекаем страницы
+        moving_pages = [self.pages[idx] for idx in source_indices]
+        
+        # Вычисляем скорректированную позицию вставки
+        # Учитываем, сколько страниц ДО позиции вставки будет удалено
+        adjusted_position = insert_position
+        for idx in source_indices:
+            if idx < insert_position:
+                adjusted_position -= 1
+        
+        # Удаляем страницы с их текущих позиций (с конца, чтобы не сбивать индексы)
+        for idx in reversed(source_indices):
+            del self.pages[idx]
+        
+        # Вставляем страницы в новую позицию
+        for i, page in enumerate(moving_pages):
+            self.pages.insert(adjusted_position + i, page)
+        
+        # Обновляем выделение
+        self.selected_pages = list(range(adjusted_position, adjusted_position + len(moving_pages)))
+        
+        self.refresh_pages_view()
+    
+    def _cleanup_drag(self):
+        """Очистка после перетаскивания"""
+        # Восстанавливаем видимость placeholder виджетов
+        for widget in self.drag_data["placeholder_widgets"]:
+            try:
+                widget.config(highlightthickness=2)
+                for child in widget.winfo_children():
+                    try:
+                        child.config(state='normal')
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Удаляем фантом
+        if self.drag_data["drag_phantom"]:
+            try:
+                self.drag_data["drag_phantom"].destroy()
+            except:
+                pass
+            self.drag_data["drag_phantom"] = None
+        
+        # Скрываем маркер (но не уничтожаем для переиспользования)
+        self._hide_insert_marker()
+        
+        # Восстанавливаем курсор
+        self.pages_scrollable_frame.config(cursor="")
+        
+        # Сбрасываем данные
+        self.drag_data["dragging"] = False
+        self.drag_data["start_index"] = None
+        self.drag_data["drag_indices"] = []
+        self.drag_data["placeholder_widgets"] = []
+        self.drag_data["insert_position"] = None
+    
+    def update_selected_info(self):
+        """Обновить информацию о выбранных страницах"""
+        if not self.selected_pages:
+            self.selected_info_label.config(text="Выбрано: -")
+        elif len(self.selected_pages) == 1:
+            page_index = self.selected_pages[0]
+            if 0 <= page_index < len(self.pages):
+                page_info = self.pages[page_index]
+                source_name = os.path.basename(page_info['source'])
+                info_text = f"Выбрано: #{page_index + 1} - {source_name}"
+                if page_info['type'] == 'pdf' or page_info['type'] == 'word':
+                    info_text += f", стр. {page_info['page_num'] + 1}"
+                self.selected_info_label.config(text=info_text)
+            else:
+                self.selected_info_label.config(text="Выбрано: -")
+        else:
+            # Множественное выделение
+            self.selected_info_label.config(text=f"Выбрано: {len(self.selected_pages)} стр.")
+    
+    def _get_columns_count(self):
+        """Вычислить количество колонок на основе ширины окна и масштаба"""
+        try:
+            canvas_width = self.pages_canvas.winfo_width()
+            if canvas_width <= 1:
+                canvas_width = 800
+            
+            base_width = 200
+            page_width = base_width * self.zoom_scale
+            
+            if self.zoom_scale >= 0.6:
+                pad = max(5, int(10 * self.zoom_scale))
+                border = 2
+            elif self.zoom_scale >= 0.3:
+                pad = 3
+                border = 1
+            else:
+                pad = 2
+                border = 1
+            
+            padding = pad * 2
+            borders = border * 2
+            grid_spacing = 4
+            total_page_width = page_width + padding + borders + grid_spacing
+            
+            if self.zoom_scale <= 0.45:
+                reserve = 140
+                safety_margin = 20
+            elif self.zoom_scale < 0.5:
+                reserve = 130
+                safety_margin = 15
+            elif self.zoom_scale < 0.8:
+                reserve = 90
+                safety_margin = 10
+            else:
+                reserve = 80
+                safety_margin = 10
+            
+            available_width = canvas_width - reserve
+            columns = int(available_width / total_page_width)
+            
+            if columns > 1:
+                actual_width_needed = columns * total_page_width
+                if actual_width_needed > available_width - safety_margin:
+                    columns -= 1
+            
+            columns = max(1, columns)
+            
+            return min(15, columns)
+        except:
+            return 3
+    
+    def zoom_in(self, instant=False):
+        if self.zoom_scale < 2.0:
+            self.zoom_scale = min(2.0, self.zoom_scale + 0.01)
+            self._update_zoom_display()
+            if instant:
+                self._update_zoom_visual()
+            else:
+                self._schedule_zoom_refresh()
+    
+    def zoom_out(self, instant=False):
+        if self.zoom_scale > 0.1:
+            self.zoom_scale = max(0.1, self.zoom_scale - 0.01)
+            self._update_zoom_display()
+            if instant:
+                self._update_zoom_visual()
+            else:
+                self._schedule_zoom_refresh()
+    
+    def _update_zoom_display(self):
+        zoom_percent = int(self.zoom_scale * 100)
+        self.zoom_var.set(str(zoom_percent))
+    
+    def _on_zoom_entry(self, event=None):
+        try:
+            value = int(self.zoom_var.get())
+            value = max(10, min(200, value))
+            self.zoom_scale = value / 100.0
+            self._update_zoom_display()
+            self._update_zoom_visual()
+        except ValueError:
+            self._update_zoom_display()
+    
+    def _schedule_zoom_refresh(self):
+        if self.zoom_refresh_timer:
+            self.window.after_cancel(self.zoom_refresh_timer)
+        self.zoom_refresh_timer = self.window.after_idle(self._update_zoom_visual)
+    
+    def zoom_reset(self):
+        self.zoom_scale = 1.0
+        self._update_zoom_display()
+        self.refresh_pages_view()
+    
+    def _on_window_resize(self, event):
+        if event.widget != self.window:
+            return
+        
+        if self.resize_timer:
+            self.window.after_cancel(self.resize_timer)
+        
+        self.resize_timer = self.window.after_idle(self._handle_resize)
+    
+    def _handle_resize(self):
+        if self.pages:
+            self._update_zoom_visual()
+    
+    def rotate_selected_page(self, angle):
+        """Повернуть выбранные страницы"""
+        if not self.selected_pages:
+            messagebox.showwarning("Предупреждение", "Сначала выберите страницу!", parent=self.window)
+            return
+        
+        # Поворачиваем все выделенные страницы
+        for page_index in self.selected_pages:
+            if 0 <= page_index < len(self.pages):
+                page_info = self.pages[page_index]
+                page_info['rotation'] = (page_info['rotation'] + angle) % 360
+        
+        self.refresh_pages_view()
+    
+    def move_page_up(self):
+        """Переместить выбранные страницы вверх"""
+        if not self.selected_pages:
+            messagebox.showwarning("Предупреждение", "Сначала выберите страницу!", parent=self.window)
+            return
+        
+        # Сортируем индексы
+        sorted_indices = sorted(self.selected_pages)
+        
+        if sorted_indices[0] == 0:
+            return  # Уже в начале
+        
+        # Перемещаем каждую страницу вверх
+        new_selected = []
+        for idx in sorted_indices:
+            if idx > 0:
+                self.pages[idx], self.pages[idx - 1] = self.pages[idx - 1], self.pages[idx]
+                new_selected.append(idx - 1)
+            else:
+                new_selected.append(idx)
+        
+        self.selected_pages = new_selected
+        self.refresh_pages_view()
+    
+    def move_page_down(self):
+        """Переместить выбранные страницы вниз"""
+        if not self.selected_pages:
+            messagebox.showwarning("Предупреждение", "Сначала выберите страницу!", parent=self.window)
+            return
+        
+        # Сортируем индексы в обратном порядке
+        sorted_indices = sorted(self.selected_pages, reverse=True)
+        
+        if sorted_indices[0] >= len(self.pages) - 1:
+            return  # Уже в конце
+        
+        # Перемещаем каждую страницу вниз
+        new_selected = []
+        for idx in sorted_indices:
+            if idx < len(self.pages) - 1:
+                self.pages[idx], self.pages[idx + 1] = self.pages[idx + 1], self.pages[idx]
+                new_selected.append(idx + 1)
+            else:
+                new_selected.append(idx)
+        
+        self.selected_pages = sorted(new_selected)
+        self.refresh_pages_view()
+    
+    def delete_selected_page(self):
+        """Удалить выбранные страницы"""
+        if not self.selected_pages:
+            messagebox.showwarning("Предупреждение", "Сначала выберите страницу!", parent=self.window)
+            return
+        
+        count = len(self.selected_pages)
+        if count == 1:
+            message = f"Удалить страницу #{self.selected_pages[0] + 1}?"
+        else:
+            message = f"Удалить {count} выбранных страниц?"
+        
+        result = messagebox.askyesno(
+            "Подтверждение",
+            message,
+            parent=self.window
+        )
+        
+        if result:
+            # Сортируем индексы в обратном порядке для корректного удаления
+            for idx in sorted(self.selected_pages, reverse=True):
+                if 0 <= idx < len(self.pages):
+                    del self.pages[idx]
+            
+            # Очищаем выделение
+            self.selected_pages = []
+            
+            self.refresh_pages_view()
+    
+    def save_document(self):
+        """Сформировать и сохранить PDF документ"""
+        if not self.pages:
+            messagebox.showwarning("Предупреждение", "Нет страниц для сохранения!", parent=self.window)
+            return
+        
+        if not REPORTLAB_AVAILABLE or not PYMUPDF_AVAILABLE:
+            messagebox.showerror("Ошибка", "Необходимые библиотеки не установлены!", parent=self.window)
+            return
+        
+        output_file = filedialog.asksaveasfilename(
+            title="Сохранить сформированный документ",
+            defaultextension=".pdf",
+            filetypes=[("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
+        )
+        
+        if not output_file:
+            return
+        
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas as pdf_canvas
+            
+            # Создаем временный PDF для каждой страницы, затем объединяем
+            temp_pdfs = []
+            
+            for idx, page_info in enumerate(self.pages):
+                temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+                temp_pdf.close()
+                temp_pdfs.append(temp_pdf.name)
+                
+                # Получаем изображение страницы
+                img = page_info['preview'].copy()
+                
+                # Применяем поворот
+                if page_info['rotation'] != 0:
+                    img = img.rotate(-page_info['rotation'], expand=True)
+                
+                # Если это PDF или Word, получаем оригинальное качество
+                if page_info['type'] in ['pdf', 'word']:
+                    if page_info['type'] == 'pdf':
+                        src_pdf = fitz.open(page_info['source'])
+                    else:
+                        src_pdf = fitz.open(page_info['temp_pdf'])
+                    
+                    src_page = src_pdf[page_info['page_num']]
+                    
+                    # Применяем поворот
+                    if page_info['rotation'] != 0:
+                        src_page.set_rotation(page_info['rotation'])
+                    
+                    # Сохраняем страницу в отдельный PDF
+                    out_pdf = fitz.open()
+                    out_pdf.insert_pdf(src_pdf, from_page=page_info['page_num'], to_page=page_info['page_num'])
+                    out_pdf.save(temp_pdf.name)
+                    out_pdf.close()
+                    src_pdf.close()
+                else:
+                    # Для изображений создаем PDF через reportlab
+                    c = pdf_canvas.Canvas(temp_pdf.name, pagesize=A4)
+                    
+                    # Масштабируем изображение под A4
+                    page_width, page_height = A4
+                    img_width, img_height = img.size
+                    
+                    # Вычисляем масштаб
+                    scale = min(page_width / img_width, page_height / img_height)
+                    new_width = img_width * scale
+                    new_height = img_height * scale
+                    
+                    # Центрируем изображение
+                    x = (page_width - new_width) / 2
+                    y = (page_height - new_height) / 2
+                    
+                    # Сохраняем изображение во временный файл
+                    temp_img = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    img.save(temp_img.name, 'PNG')
+                    temp_img.close()
+                    
+                    c.drawImage(temp_img.name, x, y, new_width, new_height)
+                    c.save()
+                    
+                    # Удаляем временное изображение
+                    os.unlink(temp_img.name)
+            
+            # Объединяем все PDF в один
+            if PdfMerger:
+                merger = PdfMerger()
+                for temp_pdf_path in temp_pdfs:
+                    merger.append(temp_pdf_path)
+                merger.write(output_file)
+                merger.close()
+            else:
+                # Используем PyMuPDF для объединения
+                output_pdf = fitz.open()
+                for temp_pdf_path in temp_pdfs:
+                    src = fitz.open(temp_pdf_path)
+                    output_pdf.insert_pdf(src)
+                    src.close()
+                output_pdf.save(output_file)
+                output_pdf.close()
+            
+            # Удаляем временные файлы
+            for temp_pdf_path in temp_pdfs:
+                try:
+                    os.unlink(temp_pdf_path)
+                except:
+                    pass
+            
+            messagebox.showinfo(
+                "Успех",
+                f"Документ успешно сформирован!\n\nСтраниц: {len(self.pages)}\n\nФайл сохранен:\n{output_file}",
+                parent=self.window
+            )
+            
+            self.window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сформировать документ:\n{str(e)}", parent=self.window)
 
 class MergeDocumentsWindow:
     """Окно объединения документов с системой вкладок"""
@@ -13627,7 +15485,7 @@ class FileBuilderWindow:
             relief=tk.FLAT,
             borderwidth=0
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(fill=tk.BOTH, expand=False, padx=1, pady=1)
         self.log_text.config(state=tk.DISABLED)
         
         def show_context_menu(event):
@@ -13703,8 +15561,10 @@ class FileBuilderWindow:
     
     def add_log(self, message, tag="info"):
         """Добавить запись в лог"""
+        self.log_text.config(state=tk.NORMAL)  # Разблокируем для записи
         self.log_text.insert(tk.END, message, tag)
         self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)  # Блокируем обратно
     
     def copy_log_text(self):
         """Копирование выделенного текста"""
@@ -14572,8 +16432,16 @@ def open_word_document(file_path):
         if WIN32COM_AVAILABLE:
             try:
                 import win32com.client
-                word = win32com.client.Dispatch("Word.Application")
-                word.Visible = True
+                try:
+                    word = win32com.client.DispatchEx("Word.Application")
+                except:
+                    word = win32com.client.Dispatch("Word.Application")
+                
+                try:
+                    word.Visible = True
+                except:
+                    pass  # Игнорируем ошибку установки Visible
+                
                 word.Documents.Open(os.path.abspath(file_path))
                 return
             except Exception as e:
@@ -16651,6 +18519,9 @@ class PreviewWindow:
                     import win32com.client
                     import pythoncom
                     
+                    word = None
+                    word_doc = None
+                    
                     try:
                         pythoncom.CoInitialize()
                         
@@ -16659,9 +18530,15 @@ class PreviewWindow:
                             word = win32com.client.gencache.EnsureDispatch("Word.Application")
                         except:
                             # Fallback на обычный Dispatch
-                            word = win32com.client.Dispatch("Word.Application")
+                            try:
+                                word = win32com.client.DispatchEx("Word.Application")
+                            except:
+                                word = win32com.client.Dispatch("Word.Application")
                         
-                        word.Visible = False
+                        try:
+                            word.Visible = False
+                        except:
+                            pass  # Игнорируем ошибку установки Visible
                         
                         temp_pdf_fd, temp_pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='word_preview_')
                         os.close(temp_pdf_fd)
@@ -16672,20 +18549,29 @@ class PreviewWindow:
                         word_doc.SaveAs(os.path.abspath(temp_pdf_path), FileFormat=17)
                         
                         word_doc.Close()
+                        word_doc = None
                         word.Quit()
-                        
-                        pythoncom.CoUninitialize()
+                        word = None
                     
                     except Exception as word_error:
+                        raise Exception(f"Не удалось конвертировать документ через Word: {word_error}")
+                    
+                    finally:
                         # Закрываем Word даже если была ошибка
-                        try:
-                            if 'word' in locals():
+                        if word_doc:
+                            try:
+                                word_doc.Close(SaveChanges=False)
+                            except:
+                                pass
+                        if word:
+                            try:
                                 word.Quit()
+                            except:
+                                pass
+                        try:
                             pythoncom.CoUninitialize()
                         except:
                             pass
-                        
-                        raise Exception(f"Не удалось конвертировать документ через Word: {word_error}")
                     
                 elif DOCX2PDF_AVAILABLE:
                     # Используем docx2pdf
