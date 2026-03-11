@@ -1478,6 +1478,10 @@ class WordPreloadManager:
                 try:
                     pythoncom.CoInitialize()
                     word = win32com.client.Dispatch("Word.Application")
+                    
+                    # КРИТИЧНО: Отключаем все диалоги
+                    word.DisplayAlerts = 0
+                    
                     # Закрываем все открытые документы без сохранения
                     if word.Documents.Count > 0:
                         for doc in list(word.Documents):
@@ -1485,7 +1489,10 @@ class WordPreloadManager:
                                 doc.Close(SaveChanges=False)
                             except:
                                 pass
-                    word.Quit()
+                    
+                    word.Quit(SaveChanges=False)
+                    del word
+                    
                 except:
                     pass
                 finally:
@@ -1493,6 +1500,8 @@ class WordPreloadManager:
                         pythoncom.CoUninitialize()
                     except:
                         pass
+                    time.sleep(0.1)
+                    gc.collect()
             except:
                 pass
         
@@ -1565,23 +1574,23 @@ class WordPreloadManager:
                     pythoncom.CoInitialize()
                     
                     try:
+                        # Используем DispatchEx для изолированного экземпляра
                         word = win32com.client.DispatchEx("Word.Application")
                     except:
                         word = win32com.client.Dispatch("Word.Application")
                     
+                    # КРИТИЧНО: Устанавливаем настройки ДО открытия документа
+                    word.DisplayAlerts = 0  # Отключаем ВСЕ диалоги и предупреждения
                     try:
                         word.Visible = False
                     except:
                         pass  # Игнорируем ошибку установки Visible
                     
-                    # Открываем Word документ
-                    doc = word.Documents.Open(os.path.abspath(file_path))
+                    # Открываем Word документ с параметрами безопасности
+                    doc = word.Documents.Open(os.path.abspath(file_path), ReadOnly=True, 
+                                             AddToRecentFiles=False, ConfirmConversions=False)
                     
                     doc.SaveAs(os.path.abspath(temp_pdf_path), FileFormat=17)
-                    doc.Close()
-                    doc = None
-                    word.Quit()
-                    word = None
                     
                     return temp_pdf_path
                     
@@ -1594,27 +1603,41 @@ class WordPreloadManager:
                             pass
                 
                 finally:
-                    # Очищаем COM объекты - КРИТИЧНО для разблокировки файлов
-                    if doc:
-                        try:
+                    # КРИТИЧНО: Правильный порядок закрытия для разблокировки файлов
+                    try:
+                        if doc:
                             doc.Close(SaveChanges=False)
-                        except:
-                            pass
-                        # Обнуляем ссылку для немедленного освобождения
-                        doc = None
-                    if word:
-                        try:
+                            del doc
+                    except:
+                        pass
+                    
+                    try:
+                        if word:
+                            # Закрываем все оставшиеся документы
+                            try:
+                                while word.Documents.Count > 0:
+                                    word.Documents(1).Close(SaveChanges=False)
+                            except:
+                                pass
+                            
                             # Принудительно закрываем Word с отключением предупреждений
                             word.DisplayAlerts = 0
-                            word.Quit()
-                        except:
-                            pass
-                        word = None
+                            word.Quit(SaveChanges=False)
+                            del word
+                    except:
+                        pass
+                    
                     try:
                         pythoncom.CoUninitialize()
                     except:
                         pass
+                    
+                    # Даем время системе закрыть процесс Word
+                    time.sleep(0.1)
+                    
                     # Принудительная сборка мусора для освобождения COM объектов
+                    doc = None
+                    word = None
                     gc.collect()
             
             # Используем docx2pdf как запасной вариант
@@ -5970,16 +5993,19 @@ def _convert_single_pdf(args):
                 
                 pythoncom.CoInitialize()
                 try:
-                    # Используем DispatchEx для нового экземпляра Word
+                    # Используем DispatchEx для изолированного экземпляра Word
                     word = win32com.client.DispatchEx("Word.Application")
+                    
+                    # КРИТИЧНО: Устанавливаем настройки ДО открытия документа
+                    word.DisplayAlerts = 0  # Отключаем ВСЕ диалоги и предупреждения
                     try:
                         word.Visible = False
                     except:
                         pass  # Игнорируем ошибку установки Visible
-                    word.DisplayAlerts = 0  # Выключаем все диалоги
                     
-                    # Открываем документ с таймаутом
-                    doc = word.Documents.Open(docx_file, ReadOnly=True, AddToRecentFiles=False)
+                    # Открываем документ с параметрами безопасности
+                    doc = word.Documents.Open(docx_file, ReadOnly=True, AddToRecentFiles=False,
+                                             ConfirmConversions=False)
                     
                     # Сохраняем в PDF
                     doc.SaveAs(pdf_file, FileFormat=17)  # 17 = wdFormatPDF
@@ -5990,17 +6016,26 @@ def _convert_single_pdf(args):
                     last_error = f"win32com: {str(e)}"
                     
                 finally:
-                    # Гарантированное закрытие документа и Word
+                    # КРИТИЧНО: Правильный порядок закрытия для разблокировки файлов
                     try:
                         if doc:
                             doc.Close(SaveChanges=False)
+                            del doc
                     except:
                         pass
                     
                     try:
                         if word:
-                            word.Quit()
-                            word = None
+                            # Закрываем все оставшиеся документы
+                            try:
+                                while word.Documents.Count > 0:
+                                    word.Documents(1).Close(SaveChanges=False)
+                            except:
+                                pass
+                            
+                            word.DisplayAlerts = 0
+                            word.Quit(SaveChanges=False)
+                            del word
                     except:
                         pass
                     
@@ -6009,7 +6044,10 @@ def _convert_single_pdf(args):
                     except:
                         pass
                     
-                    # Очищаем ссылки
+                    # Даем время системе закрыть процесс Word
+                    time.sleep(0.1)
+                    
+                    # Очищаем ссылки и принудительно собираем мусор
                     doc = None
                     word = None
                     gc.collect()
@@ -10957,38 +10995,69 @@ class GenerationDocApp:
             )
         
         word = None
+        doc = None
         try:
-            word = win32com.client.Dispatch("Word.Application")
+            import pythoncom
+            pythoncom.CoInitialize()
+            
+            # Используем DispatchEx для изолированного экземпляра Word
+            try:
+                word = win32com.client.DispatchEx("Word.Application")
+            except:
+                word = win32com.client.Dispatch("Word.Application")
+            
+            # КРИТИЧНО: Устанавливаем настройки ДО открытия документа
+            word.DisplayAlerts = 0  # Отключаем ВСЕ диалоги и предупреждения
             try:
                 word.Visible = False
             except:
                 pass  # Игнорируем ошибку установки Visible
-            word.DisplayAlerts = 0  # Отключаем все диалоги
             
-            doc = word.Documents.Open(docx_file)
+            # Открываем документ с параметрами безопасности
+            doc = word.Documents.Open(docx_file, ReadOnly=True, AddToRecentFiles=False, 
+                                     ConfirmConversions=False)
             
-            doc.SaveAs(pdf_file, FileFormat=17)
-            
-            doc.Close(False)
+            # Сохраняем в PDF
+            doc.SaveAs(pdf_file, FileFormat=17)  # 17 = wdFormatPDF
             
         except Exception as e:
             raise Exception(f"Ошибка при конвертации через Word COM: {str(e)}")
         
         finally:
-            if word:
-                try:
-                    # Принудительно закрываем Word для освобождения файлов
+            # КРИТИЧНО: Правильный порядок закрытия для разблокировки файлов
+            try:
+                if doc:
+                    doc.Close(SaveChanges=False)
+                    del doc
+            except:
+                pass
+            
+            try:
+                if word:
+                    # Закрываем все открытые документы
+                    try:
+                        while word.Documents.Count > 0:
+                            word.Documents(1).Close(SaveChanges=False)
+                    except:
+                        pass
+                    
+                    # Выключаем предупреждения перед закрытием
                     word.DisplayAlerts = 0
-                    word.Quit()
-                except:
-                    pass
-                word = None
+                    word.Quit(SaveChanges=False)
+                    del word
+            except:
+                pass
+            
             try:
                 import pythoncom
                 pythoncom.CoUninitialize()
             except:
                 pass
-            # Принудительная сборка мусора
+            
+            # Даем время системе закрыть процесс Word
+            time.sleep(0.1)
+            
+            # Принудительная сборка мусора для освобождения COM объектов
             gc.collect()
     
     @staticmethod
@@ -13728,42 +13797,58 @@ DRAG & DROP:
                     import pythoncom
                     pythoncom.CoInitialize()
                     
-                    word = win32com.client.Dispatch("Word.Application")
+                    try:
+                        word = win32com.client.DispatchEx("Word.Application")
+                    except:
+                        word = win32com.client.Dispatch("Word.Application")
                     
+                    # КРИТИЧНО: Устанавливаем настройки ДО открытия документа
+                    word.DisplayAlerts = 0
                     try:
                         word.Visible = False
                     except:
                         pass
                     
-                    word.DisplayAlerts = 0
-                    
-                    doc = word.Documents.Open(os.path.abspath(word_path))
+                    doc = word.Documents.Open(os.path.abspath(word_path), ReadOnly=True,
+                                             AddToRecentFiles=False, ConfirmConversions=False)
                     
                     doc.SaveAs(os.path.abspath(temp_pdf.name), FileFormat=17)
-                    doc.Close(False)
-                    doc = None
-                    word.Quit()
-                    word = None
+                    
                     conversion_success = True
                     
                 except Exception:
                     pass
                     
                 finally:
-                    if doc:
-                        try:
+                    # КРИТИЧНО: Правильный порядок закрытия
+                    try:
+                        if doc:
                             doc.Close(SaveChanges=False)
-                        except:
-                            pass
-                    if word:
-                        try:
-                            word.Quit()
-                        except:
-                            pass
+                            del doc
+                    except:
+                        pass
+                    
+                    try:
+                        if word:
+                            try:
+                                while word.Documents.Count > 0:
+                                    word.Documents(1).Close(SaveChanges=False)
+                            except:
+                                pass
+                            word.DisplayAlerts = 0
+                            word.Quit(SaveChanges=False)
+                            del word
+                    except:
+                        pass
+                    
                     try:
                         pythoncom.CoUninitialize()
                     except:
                         pass
+                    
+                    time.sleep(0.1)
+                    doc = None
+                    word = None
                     import gc
                     gc.collect()
             
@@ -19494,6 +19579,8 @@ class PreviewWindow:
                             except:
                                 word = win32com.client.Dispatch("Word.Application")
                         
+                        # КРИТИЧНО: Устанавливаем настройки ДО открытия документа
+                        word.DisplayAlerts = 0
                         try:
                             word.Visible = False
                         except:
@@ -19502,35 +19589,46 @@ class PreviewWindow:
                         temp_pdf_fd, temp_pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='word_preview_')
                         os.close(temp_pdf_fd)
                         
-                        # Открываем модифицированный Word документ
-                        word_doc = word.Documents.Open(os.path.abspath(temp_docx_path))
+                        # Открываем модифицированный Word документ с параметрами безопасности
+                        word_doc = word.Documents.Open(os.path.abspath(temp_docx_path), ReadOnly=True,
+                                                       AddToRecentFiles=False, ConfirmConversions=False)
                         
                         word_doc.SaveAs(os.path.abspath(temp_pdf_path), FileFormat=17)
-                        
-                        word_doc.Close()
-                        word_doc = None
-                        word.Quit()
-                        word = None
                     
                     except Exception as word_error:
                         raise Exception(f"Не удалось конвертировать документ через Word: {word_error}")
                     
                     finally:
-                        # Закрываем Word даже если была ошибка
-                        if word_doc:
-                            try:
+                        # КРИТИЧНО: Правильный порядок закрытия
+                        try:
+                            if word_doc:
                                 word_doc.Close(SaveChanges=False)
-                            except:
-                                pass
-                        if word:
-                            try:
-                                word.Quit()
-                            except:
-                                pass
+                                del word_doc
+                        except:
+                            pass
+                        
+                        try:
+                            if word:
+                                try:
+                                    while word.Documents.Count > 0:
+                                        word.Documents(1).Close(SaveChanges=False)
+                                except:
+                                    pass
+                                word.DisplayAlerts = 0
+                                word.Quit(SaveChanges=False)
+                                del word
+                        except:
+                            pass
+                        
                         try:
                             pythoncom.CoUninitialize()
                         except:
                             pass
+                        
+                        time.sleep(0.1)
+                        word_doc = None
+                        word = None
+                        gc.collect()
                     
                 elif DOCX2PDF_AVAILABLE:
                     # Используем docx2pdf
@@ -20600,13 +20698,20 @@ def _cleanup_on_exit():
                 try:
                     pythoncom.CoInitialize()
                     word = win32com.client.Dispatch("Word.Application")
+                    
+                    # КРИТИЧНО: Отключаем все диалоги
+                    word.DisplayAlerts = 0
+                    
                     if word.Documents.Count > 0:
                         for doc in list(word.Documents):
                             try:
                                 doc.Close(SaveChanges=False)
                             except:
                                 pass
-                    word.Quit()
+                    
+                    word.Quit(SaveChanges=False)
+                    del word
+                    
                 except:
                     pass
                 finally:
@@ -20614,6 +20719,8 @@ def _cleanup_on_exit():
                         pythoncom.CoUninitialize()
                     except:
                         pass
+                    time.sleep(0.1)
+                    gc.collect()
             except:
                 pass
     except:
