@@ -158,6 +158,8 @@ COLORS = {
     "success": "#10B981",
     "success_hover": "#059669",
     "success_light": "#D1FAE5",
+    "info": "#3B82F6",
+    "info_hover": "#2563EB",
     "warning": "#F59E0B",
     "warning_hover": "#D97706",
     "warning_light": "#FEF3C7",
@@ -14714,8 +14716,139 @@ DRAG & DROP:
             messagebox.showerror("Ошибка", "Необходимые библиотеки не установлены!", parent=self.window)
             return
         
+        # Показываем диалог выбора режима сохранения
+        self._show_save_mode_dialog()
+    
+    def _show_save_mode_dialog(self):
+        """Показать диалог выбора режима сохранения"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Режим сохранения")
+        dialog.geometry("500x350")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        
+        # Центрируем диалог
+        dialog.update_idletasks()
+        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (500 // 2)
+        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (350 // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Заголовок
+        title_frame = tk.Frame(dialog, bg=COLORS["primary"], height=50)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
+        
+        tk.Label(
+            title_frame,
+            text="Выберите режим сохранения",
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["primary"],
+            fg="white"
+        ).pack(pady=15)
+        
+        # Основной контейнер
+        main_frame = tk.Frame(dialog, bg=COLORS["bg_secondary"], padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Информация
+        info_text = f"Всего страниц в редакторе: {len(self.pages)}\n"
+        if self.selected_pages:
+            info_text += f"Выделено страниц: {len(self.selected_pages)}"
+        else:
+            info_text += "Выделенных страниц нет"
+        
+        tk.Label(
+            main_frame,
+            text=info_text,
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            justify=tk.LEFT
+        ).pack(pady=(0, 20))
+        
+        # Кнопка 1: Сохранить все страницы
+        btn_all = tk.Button(
+            main_frame,
+            text="📄 Сохранить все страницы",
+            command=lambda: self._on_save_mode_selected(dialog, "all"),
+            font=FONTS["button"],
+            bg=COLORS["primary"],
+            fg="white",
+            activebackground=COLORS["primary_hover"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=15
+        )
+        btn_all.pack(fill=tk.X, pady=5)
+        
+        # Кнопка 2: Сохранить выделенные страницы
+        has_selection = len(self.selected_pages) > 0
+        btn_selected = tk.Button(
+            main_frame,
+            text=f"✓ Сохранить только выделенные ({len(self.selected_pages)} стр.)" if has_selection else "✓ Сохранить только выделенные (нет выделения)",
+            command=lambda: self._on_save_mode_selected(dialog, "selected"),
+            font=FONTS["button"],
+            bg=COLORS["success"] if has_selection else COLORS["border"],
+            fg="white" if has_selection else COLORS["text_secondary"],
+            activebackground=COLORS["success_hover"] if has_selection else COLORS["border"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2" if has_selection else "arrow",
+            padx=20,
+            pady=15,
+            state=tk.NORMAL if has_selection else tk.DISABLED
+        )
+        btn_selected.pack(fill=tk.X, pady=5)
+        
+        # Кнопка 3: Разделить по диапазонам
+        btn_ranges = tk.Button(
+            main_frame,
+            text="📑 Разделить на несколько файлов (по диапазонам)",
+            command=lambda: self._on_save_mode_selected(dialog, "ranges"),
+            font=FONTS["button"],
+            bg=COLORS["info"],
+            fg="white",
+            activebackground=COLORS["info_hover"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=15
+        )
+        btn_ranges.pack(fill=tk.X, pady=5)
+        
+        # Кнопка отмены
+        btn_cancel = tk.Button(
+            main_frame,
+            text="Отмена",
+            command=dialog.destroy,
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=10
+        )
+        btn_cancel.pack(fill=tk.X, pady=(20, 0))
+    
+    def _on_save_mode_selected(self, dialog, mode):
+        """Обработка выбора режима сохранения"""
+        dialog.destroy()
+        
+        if mode == "all":
+            self._save_all_pages()
+        elif mode == "selected":
+            self._save_selected_pages()
+        elif mode == "ranges":
+            self._save_by_ranges()
+    
+    def _save_all_pages(self):
+        """Сохранить все страницы в один PDF"""
         output_file = filedialog.asksaveasfilename(
-            title="Сохранить сформированный документ",
+            title="Сохранить все страницы",
             defaultextension=".pdf",
             filetypes=[("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
         )
@@ -14724,13 +14857,706 @@ DRAG & DROP:
             return
         
         try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas as pdf_canvas
+            # Используем все страницы
+            pages_to_save = list(range(len(self.pages)))
+            self._save_pages_to_pdf(pages_to_save, output_file)
             
-            # Создаем временный PDF для каждой страницы, затем объединяем
-            temp_pdfs = []
+            messagebox.showinfo(
+                "Успех",
+                f"Документ успешно сформирован!\n\nСтраниц: {len(pages_to_save)}\n\nФайл сохранен:\n{output_file}",
+                parent=self.window
+            )
             
-            for idx, page_info in enumerate(self.pages):
+            self.window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сформировать документ:\n{str(e)}", parent=self.window)
+    
+    def _save_selected_pages(self):
+        """Сохранить только выделенные страницы"""
+        if not self.selected_pages:
+            messagebox.showwarning("Предупреждение", "Нет выделенных страниц!", parent=self.window)
+            return
+        
+        output_file = filedialog.asksaveasfilename(
+            title=f"Сохранить выделенные страницы ({len(self.selected_pages)} стр.)",
+            defaultextension=".pdf",
+            filetypes=[("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
+        )
+        
+        if not output_file:
+            return
+        
+        try:
+            # Сохраняем только выделенные страницы (в порядке их индексов)
+            pages_to_save = sorted(self.selected_pages)
+            self._save_pages_to_pdf(pages_to_save, output_file)
+            
+            messagebox.showinfo(
+                "Успех",
+                f"Выделенные страницы успешно сохранены!\n\nСтраниц: {len(pages_to_save)}\n\nФайл сохранен:\n{output_file}\n\n✓ Редактор остается открытым для продолжения работы",
+                parent=self.window
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить страницы:\n{str(e)}", parent=self.window)
+    
+    def _save_by_ranges(self):
+        """Разделить страницы по диапазонам и сохранить в несколько файлов"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Разделение по диапазонам")
+        dialog.geometry("550x450")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        
+        # Центрируем диалог
+        dialog.update_idletasks()
+        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (550 // 2)
+        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (450 // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Заголовок
+        title_frame = tk.Frame(dialog, bg=COLORS["primary"], height=50)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
+        
+        tk.Label(
+            title_frame,
+            text="Разделение на файлы",
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["primary"],
+            fg="white"
+        ).pack(pady=15)
+        
+        # Основной контейнер
+        main_frame = tk.Frame(dialog, bg=COLORS["bg_secondary"], padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(
+            main_frame,
+            text=f"Всего страниц: {len(self.pages)}",
+            font=FONTS["heading"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(pady=(0, 15))
+        
+        # Переключатель режима
+        mode_var = tk.StringVar(value="auto")
+        
+        mode_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        mode_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Автоматическое разделение (равные группы)",
+            variable=mode_var,
+            value="auto",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["bg_secondary"],
+            selectcolor="white",
+            cursor="hand2"
+        ).pack(anchor="w")
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Ручное указание диапазонов",
+            variable=mode_var,
+            value="manual",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["bg_secondary"],
+            selectcolor="white",
+            cursor="hand2"
+        ).pack(anchor="w", pady=(5, 0))
+        
+        # Контейнер для автоматического режима
+        auto_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        auto_frame.pack(fill=tk.X, pady=10)
+        
+        tk.Label(
+            auto_frame,
+            text="Количество страниц в каждом файле:",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor="w", pady=(0, 5))
+        
+        input_frame = tk.Frame(auto_frame, bg=COLORS["bg_secondary"])
+        input_frame.pack(anchor="w")
+        
+        pages_per_file_var = tk.StringVar(value="3")
+        pages_entry = tk.Entry(
+            input_frame,
+            textvariable=pages_per_file_var,
+            font=("Segoe UI", 12),
+            width=8,
+            justify=tk.CENTER
+        )
+        pages_entry.pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Label(
+            input_frame,
+            text="страниц",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT)
+        
+        # Контейнер для ручного режима
+        manual_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        manual_frame.pack(fill=tk.X, pady=10)
+        
+        tk.Label(
+            manual_frame,
+            text="Укажите диапазоны через запятую (например: 1-3, 4-7, 8-9):",
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor="w", pady=(0, 5))
+        
+        ranges_var = tk.StringVar(value="")
+        ranges_entry = tk.Entry(
+            manual_frame,
+            textvariable=ranges_var,
+            font=("Segoe UI", 11),
+            width=40
+        )
+        ranges_entry.pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(
+            manual_frame,
+            text="💡 Нумерация страниц начинается с 1",
+            font=FONTS["small"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"]
+        ).pack(anchor="w")
+        
+        # Информационная подсказка
+        info_label = tk.Label(
+            main_frame,
+            text="",
+            font=FONTS["small"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"],
+            justify=tk.LEFT,
+            wraplength=480
+        )
+        info_label.pack(pady=(10, 0))
+        
+        def update_visibility(*args):
+            if mode_var.get() == "auto":
+                auto_frame.pack(fill=tk.X, pady=10)
+                manual_frame.pack_forget()
+                update_auto_info()
+            else:
+                auto_frame.pack_forget()
+                manual_frame.pack(fill=tk.X, pady=10)
+                update_manual_info()
+        
+        def update_auto_info(*args):
+            if mode_var.get() != "auto":
+                return
+            try:
+                pages_per_file = int(pages_per_file_var.get())
+                if pages_per_file < 1:
+                    info_label.config(text="❌ Минимум 1 страница", fg=COLORS["danger"])
+                elif pages_per_file > len(self.pages):
+                    info_label.config(text="❌ Больше чем всего страниц", fg=COLORS["danger"])
+                else:
+                    num_files = (len(self.pages) + pages_per_file - 1) // pages_per_file
+                    info_label.config(
+                        text=f"✓ Будет создано файлов: {num_files}",
+                        fg=COLORS["success"]
+                    )
+            except ValueError:
+                info_label.config(text="❌ Введите число", fg=COLORS["danger"])
+        
+        def update_manual_info(*args):
+            if mode_var.get() != "manual":
+                return
+            
+            ranges_text = ranges_var.get().strip()
+            if not ranges_text:
+                info_label.config(text="Введите диапазоны", fg=COLORS["text_secondary"])
+                return
+            
+            # Парсим диапазоны
+            parsed_ranges = self._parse_ranges(ranges_text, len(self.pages))
+            
+            if parsed_ranges is None:
+                info_label.config(text="❌ Неверный формат диапазонов", fg=COLORS["danger"])
+            elif "error" in parsed_ranges:
+                info_label.config(text=f"❌ {parsed_ranges['error']}", fg=COLORS["danger"])
+            else:
+                ranges_list = parsed_ranges["ranges"]
+                num_files = len(ranges_list)
+                total_pages = sum(len(r) for r in ranges_list)
+                
+                ranges_preview = ", ".join([f"{r[0]+1}-{r[-1]+1}" for r in ranges_list[:5]])
+                if num_files > 5:
+                    ranges_preview += "..."
+                
+                info_label.config(
+                    text=f"✓ Файлов: {num_files}, Страниц: {total_pages} из {len(self.pages)}\nДиапазоны: {ranges_preview}",
+                    fg=COLORS["success"]
+                )
+        
+        mode_var.trace_add("write", update_visibility)
+        pages_per_file_var.trace_add("write", update_auto_info)
+        ranges_var.trace_add("write", update_manual_info)
+        
+        update_visibility()
+        
+        # Кнопки
+        buttons_frame = tk.Frame(main_frame, bg=COLORS["bg_secondary"])
+        buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(20, 0))
+        
+        def on_ok():
+            if mode_var.get() == "auto":
+                try:
+                    pages_per_file = int(pages_per_file_var.get())
+                    if pages_per_file < 1 or pages_per_file > len(self.pages):
+                        messagebox.showwarning(
+                            "Предупреждение",
+                            "Введите корректное количество страниц!",
+                            parent=dialog
+                        )
+                        return
+                    
+                    dialog.destroy()
+                    self._perform_save_by_auto_ranges(pages_per_file)
+                    
+                except ValueError:
+                    messagebox.showwarning(
+                        "Предупреждение",
+                        "Введите корректное число!",
+                        parent=dialog
+                    )
+            else:
+                ranges_text = ranges_var.get().strip()
+                if not ranges_text:
+                    messagebox.showwarning(
+                        "Предупреждение",
+                        "Введите диапазоны страниц!",
+                        parent=dialog
+                    )
+                    return
+                
+                parsed_ranges = self._parse_ranges(ranges_text, len(self.pages))
+                
+                if parsed_ranges is None or "error" in parsed_ranges:
+                    error_msg = parsed_ranges.get("error", "Неверный формат диапазонов") if parsed_ranges else "Неверный формат диапазонов"
+                    messagebox.showwarning(
+                        "Предупреждение",
+                        error_msg,
+                        parent=dialog
+                    )
+                    return
+                
+                dialog.destroy()
+                self._perform_save_by_manual_ranges(parsed_ranges["ranges"])
+        
+        btn_ok = tk.Button(
+            buttons_frame,
+            text="Разделить и сохранить",
+            command=on_ok,
+            font=FONTS["button"],
+            bg=COLORS["primary"],
+            fg="white",
+            activebackground=COLORS["primary_hover"],
+            activeforeground="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=12
+        )
+        btn_ok.pack(fill=tk.X, pady=(0, 5))
+        
+        btn_cancel = tk.Button(
+            buttons_frame,
+            text="Отмена",
+            command=dialog.destroy,
+            font=FONTS["body"],
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=20,
+            pady=10
+        )
+        btn_cancel.pack(fill=tk.X)
+        
+        pages_entry.focus_set()
+        pages_entry.select_range(0, tk.END)
+    
+    def _parse_ranges(self, ranges_text, total_pages):
+        """Парсит строку диапазонов вида '1-3, 4-7, 8-9'
+        
+        Args:
+            ranges_text: строка с диапазонами
+            total_pages: общее количество страниц
+            
+        Returns:
+            dict с ключом 'ranges' (список списков индексов) или 'error' (сообщение об ошибке)
+            или None если формат совсем неверный
+        """
+        try:
+            ranges_text = ranges_text.strip()
+            if not ranges_text:
+                return None
+            
+            # Разбиваем по запятым
+            parts = [p.strip() for p in ranges_text.split(',')]
+            ranges_list = []
+            used_pages = set()
+            
+            for part in parts:
+                if not part:
+                    continue
+                
+                # Проверяем формат диапазона
+                if '-' in part:
+                    # Диапазон вида "1-3"
+                    match = part.split('-')
+                    if len(match) != 2:
+                        return {"error": f"Неверный формат диапазона: '{part}'"}
+                    
+                    try:
+                        start = int(match[0].strip())
+                        end = int(match[1].strip())
+                    except ValueError:
+                        return {"error": f"Неверные числа в диапазоне: '{part}'"}
+                    
+                    if start < 1 or end < 1:
+                        return {"error": f"Номера страниц должны быть >= 1: '{part}'"}
+                    
+                    if start > total_pages or end > total_pages:
+                        return {"error": f"Номера страниц не должны превышать {total_pages}: '{part}'"}
+                    
+                    if start > end:
+                        return {"error": f"Начало диапазона больше конца: '{part}'"}
+                    
+                    # Создаем список индексов (с 0)
+                    page_indices = list(range(start - 1, end))
+                    
+                    # Проверяем на пересечения
+                    for idx in page_indices:
+                        if idx in used_pages:
+                            return {"error": f"Страница {idx+1} встречается в нескольких диапазонах"}
+                        used_pages.add(idx)
+                    
+                    ranges_list.append(page_indices)
+                else:
+                    # Одиночная страница
+                    try:
+                        page_num = int(part.strip())
+                    except ValueError:
+                        return {"error": f"Неверный номер страницы: '{part}'"}
+                    
+                    if page_num < 1:
+                        return {"error": f"Номер страницы должен быть >= 1: '{part}'"}
+                    
+                    if page_num > total_pages:
+                        return {"error": f"Номер страницы не должен превышать {total_pages}: '{part}'"}
+                    
+                    idx = page_num - 1
+                    if idx in used_pages:
+                        return {"error": f"Страница {page_num} встречается несколько раз"}
+                    used_pages.add(idx)
+                    
+                    ranges_list.append([idx])
+            
+            if not ranges_list:
+                return {"error": "Не указано ни одного диапазона"}
+            
+            return {"ranges": ranges_list}
+            
+        except Exception as e:
+            return {"error": f"Ошибка парсинга: {str(e)}"}
+    
+    def _perform_save_by_auto_ranges(self, pages_per_file):
+        """Выполнить разделение и сохранение файлов"""
+        # Выбор директории для сохранения
+        output_dir = filedialog.askdirectory(
+            title="Выберите папку для сохранения файлов"
+        )
+        
+        if not output_dir:
+            return
+        
+        # Запрос базового имени файла
+        base_name_dialog = tk.Toplevel(self.window)
+        base_name_dialog.title("Имя файлов")
+        base_name_dialog.geometry("400x200")
+        base_name_dialog.transient(self.window)
+        base_name_dialog.grab_set()
+        
+        # Центрируем
+        base_name_dialog.update_idletasks()
+        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (400 // 2)
+        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (200 // 2)
+        base_name_dialog.geometry(f"+{x}+{y}")
+        
+        tk.Label(
+            base_name_dialog,
+            text="Введите базовое имя для файлов:",
+            font=FONTS["body"],
+            padx=20,
+            pady=15
+        ).pack()
+        
+        base_name_var = tk.StringVar(value="документ")
+        base_name_entry = tk.Entry(
+            base_name_dialog,
+            textvariable=base_name_var,
+            font=("Segoe UI", 11),
+            width=30
+        )
+        base_name_entry.pack(padx=20, pady=10)
+        
+        tk.Label(
+            base_name_dialog,
+            text="Файлы будут названы: документ_1.pdf, документ_2.pdf...",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            padx=20
+        ).pack()
+        
+        result_container = {"confirmed": False}
+        
+        def on_confirm():
+            if not base_name_var.get().strip():
+                messagebox.showwarning("Предупреждение", "Введите имя файла!", parent=base_name_dialog)
+                return
+            result_container["confirmed"] = True
+            base_name_dialog.destroy()
+        
+        btn_frame = tk.Frame(base_name_dialog)
+        btn_frame.pack(pady=15)
+        
+        tk.Button(
+            btn_frame,
+            text="OK",
+            command=on_confirm,
+            font=FONTS["button"],
+            bg=COLORS["primary"],
+            fg="white",
+            padx=30,
+            pady=8,
+            relief=tk.FLAT,
+            cursor="hand2"
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="Отмена",
+            command=base_name_dialog.destroy,
+            font=FONTS["body"],
+            padx=30,
+            pady=8,
+            relief=tk.FLAT,
+            cursor="hand2"
+        ).pack(side=tk.LEFT, padx=5)
+        
+        base_name_entry.focus_set()
+        base_name_entry.select_range(0, tk.END)
+        base_name_entry.bind("<Return>", lambda e: on_confirm())
+        
+        self.window.wait_window(base_name_dialog)
+        
+        if not result_container["confirmed"]:
+            return
+        
+        base_name = base_name_var.get().strip()
+        
+        try:
+            # Разделяем страницы на группы
+            num_files = (len(self.pages) + pages_per_file - 1) // pages_per_file
+            saved_files = []
+            
+            for file_idx in range(num_files):
+                start_page = file_idx * pages_per_file
+                end_page = min(start_page + pages_per_file, len(self.pages))
+                
+                pages_to_save = list(range(start_page, end_page))
+                
+                output_file = os.path.join(output_dir, f"{base_name}_{file_idx + 1}.pdf")
+                
+                self._save_pages_to_pdf(pages_to_save, output_file)
+                saved_files.append(output_file)
+            
+            files_list = "\n".join([f"• {os.path.basename(f)}" for f in saved_files])
+            
+            messagebox.showinfo(
+                "Успех",
+                f"Документы успешно сформированы!\n\n"
+                f"Создано файлов: {len(saved_files)}\n"
+                f"Папка: {output_dir}\n\n"
+                f"Файлы:\n{files_list}\n\n"
+                f"✓ Редактор остается открытым для продолжения работы",
+                parent=self.window
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сформировать документы:\n{str(e)}", parent=self.window)
+    
+    def _perform_save_by_manual_ranges(self, ranges_list):
+        """Выполнить разделение и сохранение файлов по ручным диапазонам
+        
+        Args:
+            ranges_list: список списков индексов страниц, например: [[0,1,2], [3,4,5,6], [7,8]]
+        """
+        # Выбор директории для сохранения
+        output_dir = filedialog.askdirectory(
+            title="Выберите папку для сохранения файлов"
+        )
+        
+        if not output_dir:
+            return
+        
+        # Запрос базового имени файла
+        base_name_dialog = tk.Toplevel(self.window)
+        base_name_dialog.title("Имя файлов")
+        base_name_dialog.geometry("400x200")
+        base_name_dialog.transient(self.window)
+        base_name_dialog.grab_set()
+        
+        # Центрируем
+        base_name_dialog.update_idletasks()
+        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (400 // 2)
+        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (200 // 2)
+        base_name_dialog.geometry(f"+{x}+{y}")
+        
+        tk.Label(
+            base_name_dialog,
+            text="Введите базовое имя для файлов:",
+            font=FONTS["body"],
+            padx=20,
+            pady=15
+        ).pack()
+        
+        base_name_var = tk.StringVar(value="документ")
+        base_name_entry = tk.Entry(
+            base_name_dialog,
+            textvariable=base_name_var,
+            font=("Segoe UI", 11),
+            width=30
+        )
+        base_name_entry.pack(padx=20, pady=10)
+        
+        tk.Label(
+            base_name_dialog,
+            text="Файлы будут названы: документ_1.pdf, документ_2.pdf...",
+            font=FONTS["small"],
+            fg=COLORS["text_secondary"],
+            padx=20
+        ).pack()
+        
+        result_container = {"confirmed": False}
+        
+        def on_confirm():
+            if not base_name_var.get().strip():
+                messagebox.showwarning("Предупреждение", "Введите имя файла!", parent=base_name_dialog)
+                return
+            result_container["confirmed"] = True
+            base_name_dialog.destroy()
+        
+        btn_frame = tk.Frame(base_name_dialog)
+        btn_frame.pack(pady=15)
+        
+        tk.Button(
+            btn_frame,
+            text="OK",
+            command=on_confirm,
+            font=FONTS["button"],
+            bg=COLORS["primary"],
+            fg="white",
+            padx=30,
+            pady=8,
+            relief=tk.FLAT,
+            cursor="hand2"
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="Отмена",
+            command=base_name_dialog.destroy,
+            font=FONTS["body"],
+            padx=30,
+            pady=8,
+            relief=tk.FLAT,
+            cursor="hand2"
+        ).pack(side=tk.LEFT, padx=5)
+        
+        base_name_entry.focus_set()
+        base_name_entry.select_range(0, tk.END)
+        base_name_entry.bind("<Return>", lambda e: on_confirm())
+        
+        self.window.wait_window(base_name_dialog)
+        
+        if not result_container["confirmed"]:
+            return
+        
+        base_name = base_name_var.get().strip()
+        
+        try:
+            saved_files = []
+            
+            for file_idx, page_range in enumerate(ranges_list):
+                pages_to_save = page_range
+                
+                output_file = os.path.join(output_dir, f"{base_name}_{file_idx + 1}.pdf")
+                
+                self._save_pages_to_pdf(pages_to_save, output_file)
+                saved_files.append(output_file)
+            
+            # Формируем красивый список файлов с информацией о страницах
+            files_details = []
+            for i, (filename, page_range) in enumerate(zip(saved_files, ranges_list)):
+                if len(page_range) == 1:
+                    page_info = f"стр. {page_range[0]+1}"
+                else:
+                    page_info = f"стр. {page_range[0]+1}-{page_range[-1]+1}"
+                files_details.append(f"• {os.path.basename(filename)} ({page_info})")
+            
+            files_list = "\n".join(files_details)
+            
+            messagebox.showinfo(
+                "Успех",
+                f"Документы успешно сформированы!\n\n"
+                f"Создано файлов: {len(saved_files)}\n"
+                f"Папка: {output_dir}\n\n"
+                f"Файлы:\n{files_list}\n\n"
+                f"✓ Редактор остается открытым для продолжения работы",
+                parent=self.window
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сформировать документы:\n{str(e)}", parent=self.window)
+    
+    def _save_pages_to_pdf(self, page_indices, output_file):
+        """Сохранить указанные страницы в PDF файл
+        
+        Args:
+            page_indices: список индексов страниц для сохранения
+            output_file: путь к выходному файлу
+        """
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas as pdf_canvas
+        
+        # Создаем временный PDF для каждой страницы
+        temp_pdfs = []
+        
+        try:
+            for idx in page_indices:
+                if idx < 0 or idx >= len(self.pages):
+                    continue
+                
+                page_info = self.pages[idx]
+                
                 temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
                 temp_pdf.close()
                 temp_pdfs.append(temp_pdf.name)
@@ -14805,24 +15631,14 @@ DRAG & DROP:
                     src.close()
                 output_pdf.save(output_file)
                 output_pdf.close()
-            
+        
+        finally:
             # Удаляем временные файлы
             for temp_pdf_path in temp_pdfs:
                 try:
                     os.unlink(temp_pdf_path)
                 except:
                     pass
-            
-            messagebox.showinfo(
-                "Успех",
-                f"Документ успешно сформирован!\n\nСтраниц: {len(self.pages)}\n\nФайл сохранен:\n{output_file}",
-                parent=self.window
-            )
-            
-            self.window.destroy()
-            
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось сформировать документ:\n{str(e)}", parent=self.window)
 
 class MergeDocumentsWindow:
     """Окно объединения документов с системой вкладок"""
