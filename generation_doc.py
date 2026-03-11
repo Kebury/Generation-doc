@@ -12,6 +12,7 @@ import json
 import calendar
 import gc
 import queue
+import atexit
 import customtkinter as ctk
 from customtkinter import CTkScrollableFrame, CTkButton, CTkLabel, CTkEntry, CTkTextbox, CTkFrame, CTkComboBox
 
@@ -19,6 +20,31 @@ multiprocessing = None
 ProcessPoolExecutor = None
 ThreadPoolExecutor = None
 as_completed = None
+
+# Глобальный реестр активных executor'ов для принудительной очистки
+_active_executors = []
+_executors_lock = threading.Lock()
+
+def _register_executor(executor):
+    """Регистрирует executor для отслеживания"""
+    with _executors_lock:
+        _active_executors.append(executor)
+
+def _unregister_executor(executor):
+    """Удаляет executor из реестра"""
+    with _executors_lock:
+        if executor in _active_executors:
+            _active_executors.remove(executor)
+
+def _shutdown_all_executors():
+    """Принудительно завершает все активные executor'ы"""
+    with _executors_lock:
+        for executor in _active_executors[:]:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except:
+                pass
+        _active_executors.clear()
 
 def _ensure_concurrent_imports():
     """Гарантирует что multiprocessing и concurrent.futures загружены"""
@@ -1431,8 +1457,43 @@ class WordPreloadManager:
             self.worker_thread.start()
     
     def stop(self):
-        """Останавливает фоновый поток"""
+        """Останавливает фоновый поток и закрывает все Word экземпляры"""
         self.running = False
+        
+        # Очищаем очередь
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except:
+                break
+        
+        # Принудительно закрываем все Word экземпляры
+        if WIN32COM_AVAILABLE:
+            try:
+                import win32com.client
+                import pythoncom
+                try:
+                    pythoncom.CoInitialize()
+                    word = win32com.client.Dispatch("Word.Application")
+                    # Закрываем все открытые документы без сохранения
+                    if word.Documents.Count > 0:
+                        for doc in list(word.Documents):
+                            try:
+                                doc.Close(SaveChanges=False)
+                            except:
+                                pass
+                    word.Quit()
+                except:
+                    pass
+                finally:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+            except:
+                pass
+        
         self.clear_cache()
     
     def _worker(self):
@@ -1484,7 +1545,11 @@ class WordPreloadManager:
                 return None
             
             temp_pdf_fd, temp_pdf_path = tempfile.mkstemp(suffix='.pdf', prefix='word_preview_')
-            os.close(temp_pdf_fd)
+            # КРИТИЧНО: Сразу закрываем дескриптор чтобы избежать блокировки
+            try:
+                os.close(temp_pdf_fd)
+            except:
+                pass
             
             # Пробуем конвертировать через win32com (Windows)
             if WIN32COM_AVAILABLE:
@@ -1527,21 +1592,28 @@ class WordPreloadManager:
                             pass
                 
                 finally:
-                    # Очищаем COM объекты
+                    # Очищаем COM объекты - КРИТИЧНО для разблокировки файлов
                     if doc:
                         try:
                             doc.Close(SaveChanges=False)
                         except:
                             pass
+                        # Обнуляем ссылку для немедленного освобождения
+                        doc = None
                     if word:
                         try:
+                            # Принудительно закрываем Word с отключением предупреждений
+                            word.DisplayAlerts = 0
                             word.Quit()
                         except:
                             pass
+                        word = None
                     try:
                         pythoncom.CoUninitialize()
                     except:
                         pass
+                    # Принудительная сборка мусора для освобождения COM объектов
+                    gc.collect()
             
             # Используем docx2pdf как запасной вариант
             if DOCX2PDF_AVAILABLE:
@@ -1634,7 +1706,17 @@ class WordPreloadManager:
             
             if temp_pdf and os.path.exists(temp_pdf):
                 try:
-                    os.unlink(temp_pdf)
+                    # КРИТИЧНО: Многократные попытки удаления для разблокировки
+                    for attempt in range(3):
+                        try:
+                            os.unlink(temp_pdf)
+                            break
+                        except PermissionError:
+                            if attempt < 2:
+                                time.sleep(0.1)
+                                gc.collect()
+                            else:
+                                pass  # Игнорируем если не удалось удалить
                 except:
                     pass
             
@@ -2284,6 +2366,10 @@ class TabTask:
         try:
             df = pd.read_excel(filename, engine='openpyxl', nrows=0)
             self.excel_columns = list(df.columns)
+            
+            # Принудительно освобождаем файл Excel
+            del df
+            gc.collect()
             
             column_values = [""] + self.excel_columns
             self.filename_column_combo.configure(values=column_values)
@@ -6065,6 +6151,7 @@ def _process_single_document(args):
         doc.save(filepath)
         logs.append(f"💾 Сохранен: {filename}")
         
+        # Освобождаем ресурсы для разблокировки файлов
         del doc
         gc.collect()
         
@@ -6205,9 +6292,15 @@ def _process_single_excel_document(args):
         wb.save(filepath)
         logs.append(f"💾 Сохранен: {filename}")
         
-        wb.close()
-        del wb
-        gc.collect()
+        # КРИТИЧНО: Правильно закрываем Excel файл для разблокировки
+        try:
+            wb.close()
+        except:
+            pass
+        finally:
+            del wb
+            # Принудительная сборка мусора для освобождения файлов
+            gc.collect()
         
         return {
             'success': True,
@@ -9059,10 +9152,24 @@ class GenerationDocApp:
                 if not result:
                     return
             
+            # Устанавливаем флаг остановки для всех активных задач
+            for tab in self.tabs:
+                if tab.is_processing:
+                    tab.should_stop = True
+            
             self.save_config()
             
+            # Принудительно завершаем все executor'ы
+            _shutdown_all_executors()
+            
+            # Останавливаем менеджер предзагрузки Word
             word_preload_manager.stop()
             
+            # Даем время фоновым потокам завершиться
+            if word_preload_manager.worker_thread and word_preload_manager.worker_thread.is_alive():
+                word_preload_manager.worker_thread.join(timeout=2.0)
+            
+            # Закрываем все дополнительные окна
             for widget in self.root.winfo_children():
                 if isinstance(widget, tk.Toplevel):
                     try:
@@ -9070,15 +9177,19 @@ class GenerationDocApp:
                     except:
                         pass
             
-            if WIN32COM_AVAILABLE:
-                try:
-                    import pythoncom
-                    pythoncom.CoUninitialize()
-                except:
-                    pass
+            # Принудительная очистка памяти
+            gc.collect()
             
-            self.root.quit()
-            self.root.destroy()
+            # Закрываем главное окно
+            try:
+                self.root.quit()
+            except:
+                pass
+            
+            try:
+                self.root.destroy()
+            except:
+                pass
             
         except Exception as e:
             try:
@@ -9086,8 +9197,12 @@ class GenerationDocApp:
             except:
                 pass
         finally:
-            import sys
-            sys.exit(0)
+            # Используем os._exit(0) для гарантированного завершения всех дочерних процессов
+            try:
+                os._exit(0)
+            except:
+                import sys
+                sys.exit(0)
     
     def process_documents_for_tab(self, tab):
         """Обработка документов для конкретной вкладки"""
@@ -9134,6 +9249,11 @@ class GenerationDocApp:
             df = pd.read_excel(excel_file, engine='openpyxl')
             
             tab.log(f"   ✓ Прочитано строк: {len(df)}")
+            
+            # ВАЖНО: Создаем копию данных и освобождаем файл для предотвращения блокировки
+            df = df.copy()
+            # Принудительно освобождаем файл Excel
+            gc.collect()
             
             # Определяем колонки с датами по заголовкам поддерживаем колонки с датами по заголовкам
             date_columns = [col for col in df.columns if self.is_date_column(col)]
@@ -9293,6 +9413,7 @@ class GenerationDocApp:
                 tab.log("")
                 
                 executor = ProcessPoolExecutor(max_workers=num_workers)
+                _register_executor(executor)  # Регистрируем executor
                 try:
                     # Отправляем задачи на выполнение с учётом типа
                     futures = {}
@@ -9343,10 +9464,13 @@ class GenerationDocApp:
                                 errors.append(f"Строка {task[0] + 1}: Критическая ошибка - {str(e)}")
                 finally:
                     # Гарантируем остановку executor
-                    if not tab.should_stop:
-                        executor.shutdown(wait=True)
-                    else:
-                        executor.shutdown(wait=False, cancel_futures=True)
+                    try:
+                        if not tab.should_stop:
+                            executor.shutdown(wait=True)
+                        else:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                    finally:
+                        _unregister_executor(executor)  # Удаляем из реестра
             
             # === ИТОГИ ===
             tab.log("\n" + "═" * 60)
@@ -10851,14 +10975,19 @@ class GenerationDocApp:
         finally:
             if word:
                 try:
+                    # Принудительно закрываем Word для освобождения файлов
+                    word.DisplayAlerts = 0
                     word.Quit()
                 except:
                     pass
-                try:
-                    import pythoncom
-                    pythoncom.CoUninitialize()
-                except:
-                    pass
+                word = None
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except:
+                pass
+            # Принудительная сборка мусора
+            gc.collect()
     
     @staticmethod
     def convert_word_to_pdf(file_paths, output_folder=None, log_callback=None,
@@ -10920,6 +11049,7 @@ class GenerationDocApp:
                 errors.append(f"{os.path.basename(result['docx_file'])}: {result['error']}")
         else:
             executor = ThreadPoolExecutor(max_workers=max_workers)
+            _register_executor(executor)  # Регистрируем executor
             try:
                 futures = {executor.submit(_convert_single_pdf, task): task for task in tasks}
                 
@@ -10957,10 +11087,13 @@ class GenerationDocApp:
                             if log_callback:
                                 log_callback(f"[{completed}/{total}] ✗ {os.path.basename(docx_file)}: {str(e)}")
             finally:
-                if should_stop_callback and should_stop_callback():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                else:
-                    executor.shutdown(wait=True)
+                try:
+                    if should_stop_callback and should_stop_callback():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    else:
+                        executor.shutdown(wait=True)
+                finally:
+                    _unregister_executor(executor)  # Удаляем из реестра
         
         if errors:
             error_msg = "Ошибки при конвертации:\n" + "\n".join(errors[:10])
@@ -11874,6 +12007,7 @@ class GenerationDocApp:
         else:
             # Параллельная обработка для нескольких файлов
             executor = ThreadPoolExecutor(max_workers=max_workers)
+            _register_executor(executor)  # Регистрируем executor
             try:
                 futures = {executor.submit(_convert_single_image, task): task for task in tasks}
                 
@@ -11917,10 +12051,13 @@ class GenerationDocApp:
                     if completed % 3 == 0:
                         gc.collect()
             finally:
-                if should_stop_callback and should_stop_callback():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                else:
-                    executor.shutdown(wait=True)
+                try:
+                    if should_stop_callback and should_stop_callback():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    else:
+                        executor.shutdown(wait=True)
+                finally:
+                    _unregister_executor(executor)  # Удаляем из реестра
         
         # Финальная очистка памяти
         gc.collect()
@@ -15187,6 +15324,9 @@ class ExcelConstructorWindow:
         try:
             self.source_df = pd.read_excel(file_path)
             
+            # Принудительно освобождаем файл Excel
+            gc.collect()
+            
             # Форматируем все значения (даты преобразуем в формат дд.мм.гггг)
             for col in self.source_df.columns:
                 self.source_df[col] = self.source_df[col].apply(
@@ -16557,6 +16697,9 @@ class ExcelEditor:
             import pandas as pd
             
             self.df = pd.read_excel(self.file_path, engine='openpyxl')
+            
+            # Принудительно освобождаем файл Excel
+            gc.collect()
             
             columns = list(self.df.columns)
             self.tree['columns'] = columns
@@ -18801,7 +18944,10 @@ class PreviewWindow:
                 self.preview_text.config(state=tk.DISABLED)
             return
         
-        try:
+        try:# Принудительно освобождаем файл Excel
+            gc.collect()
+            
+            
             df = pd.read_excel(self.file_path, nrows=100, engine='openpyxl')
             
             self.tree["columns"] = list(df.columns)
@@ -19621,10 +19767,49 @@ result = ' '.join(values).replace('старое', 'новое')
         self.cleanup()
         self.dialog.destroy()
 
+def _cleanup_on_exit():
+    """Обработчик экстренного завершения через atexit"""
+    try:
+        # Завершаем все executor'ы
+        _shutdown_all_executors()
+        
+        # Останавливаем Word менеджер
+        word_preload_manager.stop()
+        
+        # Закрываем все Word экземпляры
+        if WIN32COM_AVAILABLE:
+            try:
+                import win32com.client
+                import pythoncom
+                try:
+                    pythoncom.CoInitialize()
+                    word = win32com.client.Dispatch("Word.Application")
+                    if word.Documents.Count > 0:
+                        for doc in list(word.Documents):
+                            try:
+                                doc.Close(SaveChanges=False)
+                            except:
+                                pass
+                    word.Quit()
+                except:
+                    pass
+                finally:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except:
+                        pass
+            except:
+                pass
+    except:
+        pass
+
 def main():
     # Защита для multiprocessing в Windows
     _ensure_concurrent_imports()
     multiprocessing.freeze_support()
+    
+    # Регистрируем обработчик экстренного завершения
+    atexit.register(_cleanup_on_exit)
     
     if TKDND_AVAILABLE:
         try:
